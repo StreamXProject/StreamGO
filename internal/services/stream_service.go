@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gotd/td/tg"
 
 	"streamgo/internal/logger"
 	"streamgo/internal/models"
@@ -71,7 +74,6 @@ func ParseRange(rangeHeader string, totalSize int64) (*ByteRange, error) {
 	}
 
 	if startStr == "" {
-		// e.g. bytes=-500 (last 500 bytes)
 		n, err := strconv.ParseInt(endStr, 10, 64)
 		if err != nil || n <= 0 {
 			return nil, fmt.Errorf("invalid range offset: %s", endStr)
@@ -132,7 +134,6 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 		totalSize = track.Telegram.FileSize
 	}
 	if totalSize <= 0 {
-		// Fallback default for unknown sizes (approx 10MB)
 		totalSize = 10 * 1024 * 1024
 	}
 
@@ -209,7 +210,6 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 	// Check Telegram client connectivity
 	if s.tgService == nil || !s.tgService.IsReady() {
 		logStream.Warnf("Telegram client not ready for track %s", trackID)
-		// If Telegram client isn't ready yet, write an empty or silence frame to avoid hanging browser
 		return
 	}
 
@@ -217,14 +217,57 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 	s.streamFromTelegram(ctx, w, track, byteRange, totalSize)
 }
 
+type rangeWriter struct {
+	w       io.Writer
+	skip    int64
+	remain  int64
+	flusher http.Flusher
+}
+
+func (rw *rangeWriter) Write(p []byte) (int, error) {
+	if rw.remain <= 0 {
+		return 0, io.EOF
+	}
+
+	n := len(p)
+	if rw.skip > 0 {
+		if int64(n) <= rw.skip {
+			rw.skip -= int64(n)
+			return n, nil
+		}
+		p = p[rw.skip:]
+		rw.skip = 0
+	}
+
+	toWrite := p
+	if int64(len(toWrite)) > rw.remain {
+		toWrite = toWrite[:rw.remain]
+	}
+
+	written, err := rw.w.Write(toWrite)
+	rw.remain -= int64(written)
+
+	if rw.flusher != nil {
+		rw.flusher.Flush()
+	}
+
+	if err != nil {
+		return written, err
+	}
+	if rw.remain <= 0 {
+		return n, io.EOF
+	}
+
+	return n, nil
+}
+
 func (s *StreamService) streamFromTelegram(
 	ctx context.Context,
-	w io.Writer,
+	w http.ResponseWriter,
 	track *models.Track,
 	byteRange *ByteRange,
 	totalSize int64,
 ) {
-	// For gotd streaming, calculate start offset and limit
 	var startOffset int64 = 0
 	var bytesRemaining int64 = totalSize
 
@@ -235,12 +278,35 @@ func (s *StreamService) streamFromTelegram(
 
 	logStream.Infof("streaming track %s: offset=%d, length=%d", track.ID, startOffset, bytesRemaining)
 
-	// Note: Chunk streaming integration with Telegram MTProto uses gotd Downloader
-	// We handle client disconnections cleanly via ctx.Done()
-	select {
-	case <-ctx.Done():
-		logStream.Debugf("client disconnected while streaming track %s", track.ID)
+	fileID := track.Telegram.FileID
+	if fileID == "" {
+		logStream.Errorf("track %s has no telegram file_id", track.ID)
 		return
-	default:
+	}
+
+	decoded, err := telegram.DecodeFileID(fileID)
+	if err != nil {
+		logStream.Errorf("failed to decode file_id for track %s: %v", track.ID, err)
+		return
+	}
+
+	location := &tg.InputDocumentFileLocation{
+		ID:            decoded.MediaID,
+		AccessHash:    decoded.AccessHash,
+		FileReference: decoded.FileReference,
+	}
+
+	flusher, _ := w.(http.Flusher)
+	rw := &rangeWriter{
+		w:       w,
+		skip:    startOffset,
+		remain:  bytesRemaining,
+		flusher: flusher,
+	}
+
+	downloader := s.tgService.Client.Downloader()
+	_, err = downloader.Download(s.tgService.API, location).Stream(ctx, rw)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
+		logStream.Warnf("streaming ended with error for track %s: %v", track.ID, err)
 	}
 }
