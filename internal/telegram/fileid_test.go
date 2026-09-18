@@ -24,4 +24,24 @@ func TestDecodeFileID(t *testing.T) {
 	if decoded.DCID != 1 {
 		t.Errorf("expected DCID 1, got %d", decoded.DCID)
 	}
+
+	// Test re-encoding back to file_id
+	reEncoded := EncodeFileID(decoded.MediaID, decoded.AccessHash, decoded.DCID, decoded.FileReference)
+	if reEncoded != sampleFileID {
+		t.Errorf("expected re-encoded file_id %q, got %q", sampleFileID, reEncoded)
+	}
+}
+
+func TestEncodeFileUniqueID(t *testing.T) {
+	// Alphaville Forever Young media_id
+	uid1 := EncodeFileUniqueID(6149766536438490758)
+	if uid1 != "AgADhiYAAhVcWFU" {
+		t.Errorf("expected 'AgADhiYAAhVcWFU', got %q", uid1)
+	}
+
+	// Taylor Swift willow media_id
+	uid2 := EncodeFileUniqueID(4999148345483069633)
+	if uid2 != "AgADwQgAAu-KYEU" {
+		t.Errorf("expected 'AgADwQgAAu-KYEU', got %q", uid2)
+	}
 }

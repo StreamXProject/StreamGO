@@ -140,16 +140,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	tgStatus := "disabled"
 	if s.TG != nil {
-		if s.TG.IsReady() {
-			self := s.TG.Self()
-			if self != nil {
-				tgStatus = "connected (" + self.FirstName + ")"
-			} else {
-				tgStatus = "connected"
-			}
-		} else {
-			tgStatus = "connecting"
-		}
+		tgStatus = s.TG.StatusString()
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{

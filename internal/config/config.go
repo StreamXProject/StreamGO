@@ -24,10 +24,12 @@ type Config struct {
 	BotToken      string
 	SecretKey     string
 	SessionString string
-	ChannelID     int64
-	DumpChannelID int64
+	ChannelID         int64
+	DumpChannelID     int64
+	MultiClients      bool
+	MultiClientTokens []string
+	FilterMode        int
 }
-
 
 // Load reads configuration from .env file (if present) and environment variables.
 func Load() *Config {
@@ -45,22 +47,44 @@ func Load() *Config {
 	// Sanitize any accidental leading equals sign (e.g. MONGO_URI==...)
 	mongoURI = strings.TrimPrefix(mongoURI, "=")
 
+	multiClients := getEnvBool("MULTI_CLIENTS", false)
+	var multiTokens []string
+	for _, key := range []string{"MULTI_CLIENTS_1", "MULTI_CLIENTS_2", "MULTI_CLIENTS_3", "MULTI_CLIENTS_4"} {
+		if val := strings.TrimSpace(os.Getenv(key)); val != "" {
+			multiTokens = append(multiTokens, val)
+		}
+	}
+	if extra := strings.TrimSpace(os.Getenv("MULTI_CLIENT_TOKENS")); extra != "" {
+		for _, part := range strings.Split(extra, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				multiTokens = append(multiTokens, p)
+			}
+		}
+	}
+	if len(multiTokens) > 0 {
+		multiClients = true
+	}
+
 	return &Config{
-		Port:          getEnv("PORT", "8000"),
-		Debug:         debug,
-		APILogs:       getEnvBool("API_LOGS", getEnvBool("HTTP_LOGS", false)),
-		CorsOrigin:    getEnv("CORS_ORIGIN", "*"),
-		MongoURI:      mongoURI,
-		DatabaseName:  getEnv("DATABASE_NAME", "Stream"),
-		ApiID:         getEnvInt("API_ID", 0),
-		ApiHash:       strings.TrimSpace(os.Getenv("API_HASH")),
-		BotToken:      strings.TrimSpace(os.Getenv("BOT_TOKEN")),
-		SecretKey:     strings.TrimSpace(os.Getenv("SECRET_KEY")),
-		SessionString: strings.TrimSpace(os.Getenv("SESSION_STRING")),
-		ChannelID:     getEnvInt64("CHANNEL_ID", 0),
-		DumpChannelID: getEnvInt64("DUMP_CHANNEL_ID", 0),
+		Port:              getEnv("PORT", "8000"),
+		Debug:             debug,
+		APILogs:           getEnvBool("API_LOGS", getEnvBool("HTTP_LOGS", false)),
+		CorsOrigin:        getEnv("CORS_ORIGIN", "*"),
+		MongoURI:          mongoURI,
+		DatabaseName:      getEnv("DATABASE_NAME", "Stream"),
+		ApiID:             getEnvInt("API_ID", 0),
+		ApiHash:           strings.TrimSpace(os.Getenv("API_HASH")),
+		BotToken:          strings.TrimSpace(os.Getenv("BOT_TOKEN")),
+		SecretKey:         strings.TrimSpace(os.Getenv("SECRET_KEY")),
+		SessionString:     strings.TrimSpace(os.Getenv("SESSION_STRING")),
+		ChannelID:         getEnvInt64("CHANNEL_ID", 0),
+		DumpChannelID:     getEnvInt64("DUMP_CHANNEL_ID", 0),
+		MultiClients:      multiClients,
+		MultiClientTokens: multiTokens,
+		FilterMode:        getEnvInt("FILTER_MODE", 0),
 	}
 }
+
 
 func getEnv(key, defaultVal string) string {
 	if val, ok := os.LookupEnv(key); ok && strings.TrimSpace(val) != "" {

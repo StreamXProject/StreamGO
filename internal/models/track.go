@@ -1,22 +1,29 @@
 package models
 
-// AudioMeta represents metadata extracted from the audio stream or tags.
+// AudioMeta represents metadata extracted from the audio stream or tags via MediaInfo.
 type AudioMeta struct {
 	Title          string   `bson:"title,omitempty" json:"title"`
-	Artist         string   `bson:"artist,omitempty" json:"artist"`
-	Performer      string   `bson:"performer,omitempty" json:"performer,omitempty"`
 	Album          string   `bson:"album,omitempty" json:"album,omitempty"`
-	AlbumID        string   `bson:"album_id,omitempty" json:"album_id,omitempty"`
-	Artists        []string `bson:"artists,omitempty" json:"artists,omitempty"`
-	DurationSec    float64  `bson:"duration_sec,omitempty" json:"duration_sec"`
+	Artist         string   `bson:"artist,omitempty" json:"artist"`
+	Composer       string   `bson:"composer,omitempty" json:"composer,omitempty"`
+	Label          string   `bson:"label,omitempty" json:"label,omitempty"`
+	Genre          string   `bson:"genre,omitempty" json:"genre,omitempty"`
+	Year           *int32   `bson:"year,omitempty" json:"year,omitempty"`
+	DurationSec    int32    `bson:"duration_sec" json:"duration_sec"`
 	Type           string   `bson:"type,omitempty" json:"type,omitempty"`
-	SamplingRateHz int      `bson:"sampling_rate_hz,omitempty" json:"sampling_rate_hz,omitempty"`
-	Bitrate        int      `bson:"bitrate,omitempty" json:"bitrate,omitempty"`
-	MimeType       string   `bson:"mime_type,omitempty" json:"mime_type,omitempty"`
-	FileSize       int64    `bson:"file_size,omitempty" json:"file_size,omitempty"`
-	CoverURL       string         `bson:"cover_url,omitempty" json:"cover_url,omitempty"`
-	Lyrics         string         `bson:"lyrics,omitempty" json:"lyrics,omitempty"`
-	Titles         map[string]any `bson:"titles,omitempty" json:"titles,omitempty"`
+	BitDepth       *int32   `bson:"bit_depth,omitempty" json:"bit_depth,omitempty"`
+	BitrateKbps    *int32   `bson:"bitrate_kbps,omitempty" json:"bitrate_kbps,omitempty"`
+	SamplingRateHz *int32   `bson:"sampling_rate_hz,omitempty" json:"sampling_rate_hz,omitempty"`
+	Artists        []string `bson:"artists,omitempty" json:"artists,omitempty"`
+	AlbumID        string   `bson:"album_id,omitempty" json:"album_id,omitempty"`
+
+	// Legacy / Compatibility fields that should NOT be serialized to MongoDB audio subdocument
+	Performer string         `bson:"performer,omitempty" json:"performer,omitempty"`
+	CoverURL  string         `bson:"-" json:"cover_url,omitempty"`
+	Lyrics    string         `bson:"-" json:"lyrics,omitempty"`
+	Titles    map[string]any `bson:"-" json:"titles,omitempty"`
+	MimeType  string         `bson:"-" json:"mime_type,omitempty"`
+	FileSize  int64          `bson:"-" json:"file_size,omitempty"`
 }
 
 // TelegramMeta stores Telegram file references and chat mapping.
@@ -33,6 +40,9 @@ type TelegramMeta struct {
 type SpotifyMeta struct {
 	URL            string `bson:"url,omitempty" json:"url,omitempty"`
 	CoverURL       string `bson:"cover_url,omitempty" json:"cover_url,omitempty"`
+	BigCoverURL    string `bson:"big_cover_url,omitempty" json:"big_cover_url,omitempty"`
+	CoverSource    string `bson:"cover_source,omitempty" json:"cover_source,omitempty"`
+	ArtistAvatar   string `bson:"artist_avatar,omitempty" json:"artist_avatar,omitempty"`
 	TrackSpotifyID string `bson:"track_spotify_id,omitempty" json:"track_spotify_id,omitempty"`
 }
 
@@ -43,17 +53,23 @@ type Track struct {
 	Telegram        TelegramMeta   `bson:"telegram" json:"telegram"`
 	Spotify         SpotifyMeta    `bson:"spotify,omitempty" json:"spotify,omitempty"`
 	Lyrics          string         `bson:"lyrics,omitempty" json:"lyrics,omitempty"`
+	LyricsCache     map[string]any `bson:"lyrics_cache,omitempty" json:"lyrics_cache,omitempty"`
 	Titles          map[string]any `bson:"titles,omitempty" json:"titles,omitempty"`
+	Fingerprint     string         `bson:"fingerprint,omitempty" json:"fingerprint,omitempty"`
+	ContentHash     string         `bson:"content_hash,omitempty" json:"content_hash,omitempty"`
 	SourceChatID    int64          `bson:"source_chat_id,omitempty" json:"source_chat_id,omitempty"`
-	SourceMessageID int64          `bson:"source_message_id,omitempty" json:"source_message_id,omitempty"`
+	SourceMessageID int32          `bson:"source_message_id,omitempty" json:"source_message_id,omitempty"`
 	CacheChatID     int64          `bson:"cache_chat_id,omitempty" json:"cache_chat_id,omitempty"`
-	CacheMessageID  int64          `bson:"cache_message_id,omitempty" json:"cache_message_id,omitempty"`
-	TopicID         int64          `bson:"topic_id,omitempty" json:"topic_id,omitempty"`
+	CacheMessageID  int32          `bson:"cache_message_id,omitempty" json:"cache_message_id,omitempty"`
+	TopicID         int32          `bson:"topic_id,omitempty" json:"topic_id"`
 	TopicName       string         `bson:"topic_name,omitempty" json:"topic_name,omitempty"`
-	PlayCount       int64          `bson:"play_count,omitempty" json:"play_count"`
+	PlayCount       int32          `bson:"play_count,omitempty" json:"play_count"`
 	LikesCount      int64          `bson:"likes_count,omitempty" json:"likes_count"`
 	CreatedAt       float64        `bson:"created_at,omitempty" json:"created_at"`
 	UpdatedAt       float64        `bson:"updated_at,omitempty" json:"updated_at"`
+	EnrichedAt      float64        `bson:"enriched_at,omitempty" json:"enriched_at"`
+	Enriched        bool           `bson:"enriched" json:"enriched"`
+	Indexed         bool           `bson:"indexed" json:"indexed"`
 	Deleted         bool           `bson:"deleted,omitempty" json:"deleted"`
 	Liked           bool           `bson:"-" json:"liked"`
 }
@@ -62,6 +78,9 @@ type Track struct {
 func (t *Track) EffectiveCoverURL() string {
 	if t.Spotify.CoverURL != "" {
 		return t.Spotify.CoverURL
+	}
+	if t.Spotify.BigCoverURL != "" {
+		return t.Spotify.BigCoverURL
 	}
 	return t.Audio.CoverURL
 }
@@ -89,16 +108,18 @@ func (t *Track) EffectiveTitles() map[string]any {
 type BrowseItem struct {
 	ID              string         `json:"_id"`
 	SourceChatID    int64          `json:"source_chat_id,omitempty"`
-	SourceMessageID int64          `json:"source_message_id,omitempty"`
-	TopicID         int64          `json:"topic_id,omitempty"`
+	SourceMessageID int32          `json:"source_message_id,omitempty"`
+	TopicID         int32          `json:"topic_id,omitempty"`
 	TopicName       string         `json:"topic_name,omitempty"`
 	Title           string         `json:"title"`
 	Artist          string         `json:"artist"`
 	Album           string         `json:"album,omitempty"`
 	AlbumID         string         `json:"album_id,omitempty"`
-	DurationSec     float64        `json:"duration_sec"`
+	DurationSec     int32          `json:"duration_sec"`
 	Type            string         `json:"type,omitempty"`
-	SamplingRateHz  int            `json:"sampling_rate_hz,omitempty"`
+	SamplingRateHz  *int32         `json:"sampling_rate_hz,omitempty"`
+	BitDepth        *int32         `json:"bit_depth,omitempty"`
+	BitrateKbps     *int32         `json:"bitrate_kbps,omitempty"`
 	SpotifyURL      string         `json:"spotify_url,omitempty"`
 	CoverURL        string         `json:"cover_url,omitempty"`
 	Titles          map[string]any `json:"titles,omitempty"`
@@ -122,6 +143,8 @@ func (t *Track) ToBrowseItem() *BrowseItem {
 		DurationSec:     t.Audio.DurationSec,
 		Type:            t.Audio.Type,
 		SamplingRateHz:  t.Audio.SamplingRateHz,
+		BitDepth:        t.Audio.BitDepth,
+		BitrateKbps:     t.Audio.BitrateKbps,
 		SpotifyURL:      t.Spotify.URL,
 		CoverURL:        t.EffectiveCoverURL(),
 		Titles:          t.EffectiveTitles(),

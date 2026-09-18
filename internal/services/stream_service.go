@@ -304,9 +304,13 @@ func (s *StreamService) streamFromTelegram(
 		flusher: flusher,
 	}
 
-	downloader := s.tgService.Client.Downloader()
-	_, err = downloader.Download(s.tgService.API, location).Stream(ctx, rw)
+	worker := s.tgService.AcquireWorker()
+	defer s.tgService.ReleaseWorker(worker)
+
+	downloader := worker.Client.Downloader()
+	_, err = downloader.Download(worker.API, location).Stream(ctx, rw)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
 		logStream.Warnf("streaming ended with error for track %s: %v", track.ID, err)
 	}
 }
+

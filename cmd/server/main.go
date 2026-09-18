@@ -14,6 +14,7 @@ import (
 	"streamgo/internal/database"
 	"streamgo/internal/logger"
 	"streamgo/internal/server"
+	"streamgo/internal/services"
 	"streamgo/internal/telegram"
 )
 
@@ -50,7 +51,18 @@ func main() {
 		}
 	}
 
-	// 3. Initialize Telegram Service (optional / background)
+	// 3. Initialize Internal Auxiliary Services
+	coverSearch := services.NewCoverSearchService()
+	lyricsSvc := services.NewLyricsEnrichmentService()
+	dedupSvc := services.NewDedupService(dbClient)
+	accessFilter := services.NewAccessFilter(cfg, dbClient)
+	enrichSvc := services.NewEnrichmentService(dbClient, coverSearch, lyricsSvc)
+
+	if dbClient != nil {
+		enrichSvc.Start(ctx, 2)
+	}
+
+	// 4. Initialize Telegram Service (Multi-Client MTProto Pool)
 	var tgService *telegram.Service
 	if cfg.ApiID > 0 && cfg.ApiHash != "" {
 		svc, err := telegram.New(cfg)
@@ -58,7 +70,13 @@ func main() {
 			log.Warnf("Failed to initialize Telegram service: %v", err)
 		} else {
 			tgService = svc
-			log.Info("Starting Telegram MTProto client in background...")
+			enrichSvc.SetDownloader(tgService)
+
+			// Attach Ingestion Listener for live channel/group audio uploads
+			listener := telegram.NewIngestionListener(cfg, dbClient, accessFilter, dedupSvc, enrichSvc.TriggerEnrich)
+			listener.SetupDispatcher(&tgService.Dispatcher)
+
+			log.Info("Starting Telegram MTProto multi-client pool in background...")
 			go func() {
 				if err := tgService.Start(ctx); err != nil {
 					log.Errorf("Telegram client start failed: %v", err)
@@ -89,6 +107,7 @@ func main() {
 	}()
 
 	// 6. Graceful Shutdown on OS Signal (SIGINT, SIGTERM)
+	signal.Ignore(syscall.SIGHUP)
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit

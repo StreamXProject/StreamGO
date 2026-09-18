@@ -1,0 +1,348 @@
+package services
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+
+	"streamgo/internal/database"
+	"streamgo/internal/logger"
+	"streamgo/internal/models"
+)
+
+var logEnrich = logger.New("enrichment")
+
+// MediaDownloader downloads partial media bytes for an indexed file_id.
+type MediaDownloader interface {
+	DownloadPartialByFileID(ctx context.Context, fileID string, maxBytes int64, w io.Writer) error
+}
+
+// EnrichmentService runs background worker goroutines to enrich track metadata.
+type EnrichmentService struct {
+	tracksCol  *mongo.Collection
+	artistsCol *mongo.Collection
+	albumsCol  *mongo.Collection
+
+	coverSearch *CoverSearchService
+	lyricsSvc   *LyricsEnrichmentService
+	downloader  MediaDownloader
+
+	workQueue chan string
+	wg        sync.WaitGroup
+}
+
+// NewEnrichmentService creates a new EnrichmentService.
+func NewEnrichmentService(
+	db *database.Client,
+	coverSearch *CoverSearchService,
+	lyricsSvc *LyricsEnrichmentService,
+) *EnrichmentService {
+	var tracksCol, artistsCol, albumsCol *mongo.Collection
+	if db != nil {
+		tracksCol = db.Collection("audioTracks")
+		artistsCol = db.Collection("artists")
+		albumsCol = db.Collection("albums")
+	}
+
+	return &EnrichmentService{
+		tracksCol:   tracksCol,
+		artistsCol:  artistsCol,
+		albumsCol:   albumsCol,
+		coverSearch: coverSearch,
+		lyricsSvc:   lyricsSvc,
+		workQueue:   make(chan string, 500),
+	}
+}
+
+// SetDownloader configures the MediaDownloader implementation for streaming partial media.
+func (s *EnrichmentService) SetDownloader(d MediaDownloader) {
+	s.downloader = d
+}
+
+// TriggerEnrich pushes a track ID to the priority enrichment queue.
+func (s *EnrichmentService) TriggerEnrich(trackID string) {
+	select {
+	case s.workQueue <- trackID:
+	default:
+		logEnrich.Warnf("enrichment queue full, dropping immediate trigger for %s", trackID)
+	}
+}
+
+// Start launches the background worker goroutines and the periodic poller.
+func (s *EnrichmentService) Start(ctx context.Context, numWorkers int) {
+	if s.tracksCol == nil {
+		return
+	}
+	if numWorkers <= 0 {
+		numWorkers = 2
+	}
+
+	logEnrich.Infof("Starting background enrichment pool with %d workers", numWorkers)
+
+	for i := 0; i < numWorkers; i++ {
+		s.wg.Add(1)
+		go s.workerLoop(ctx, i+1)
+	}
+
+	// Periodic polling loop finding unenriched tracks
+	go s.pollLoop(ctx)
+}
+
+func (s *EnrichmentService) pollLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.enqueueUnenrichedTracks(ctx)
+		}
+	}
+}
+
+func (s *EnrichmentService) enqueueUnenrichedTracks(ctx context.Context) {
+	filter := bson.M{
+		"enriched": bson.M{"$ne": true},
+		"deleted":  bson.M{"$ne": true},
+	}
+	opts := options.Find().SetLimit(50).SetProjection(bson.M{"_id": 1})
+
+	cursor, err := s.tracksCol.Find(ctx, filter, opts)
+	if err != nil {
+		return
+	}
+	defer cursor.Close(ctx)
+
+	for cursor.Next(ctx) {
+		var doc struct {
+			ID string `bson:"_id"`
+		}
+		if err := cursor.Decode(&doc); err == nil && doc.ID != "" {
+			select {
+			case s.workQueue <- doc.ID:
+			default:
+				return
+			}
+		}
+	}
+}
+
+func (s *EnrichmentService) workerLoop(ctx context.Context, workerID int) {
+	defer s.wg.Done()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case trackID := <-s.workQueue:
+			s.enrichSingleTrack(ctx, trackID)
+		}
+	}
+}
+
+func (s *EnrichmentService) enrichSingleTrack(ctx context.Context, trackID string) {
+	var track models.Track
+	err := s.tracksCol.FindOne(ctx, bson.M{"_id": trackID}).Decode(&track)
+	if err != nil {
+		return
+	}
+
+	title := track.Audio.Title
+	artist := track.EffectiveArtist()
+	album := track.Audio.Album
+	durationSec := track.Audio.DurationSec
+
+	nowTs := float64(time.Now().Unix())
+	updateFields := bson.M{
+		"enriched":    true,
+		"enriched_at": nowTs,
+		"updated_at":  nowTs,
+	}
+
+	// 1. Partial Media Download & MediaInfo extraction (matching Python StreamXBot)
+	if s.downloader != nil && track.Telegram.FileID != "" {
+		tmpFile, err := os.CreateTemp("", fmt.Sprintf("streamgo_mi_%s_*.part", track.ID))
+		if err == nil {
+			tmpPath := tmpFile.Name()
+			dlErr := s.downloader.DownloadPartialByFileID(ctx, track.Telegram.FileID, 2_000_000, tmpFile)
+			tmpFile.Close()
+			defer os.Remove(tmpPath)
+
+			if dlErr == nil || dlErr == io.EOF {
+				// A. Compute Content Hash (sha256 prefix of downloaded chunk)
+				if ch, err := SHA256PrefixFile(tmpPath, 10*1024*1024); err == nil && ch != "" {
+					updateFields["content_hash"] = ch
+				}
+
+				// B. Run MediaInfo
+				if output, err := RunMediaInfo(tmpPath); err == nil && output != "" {
+					meta := ParseMediaInfo(output, track.Audio.DurationSec, track.Telegram.FileSize)
+					if meta != nil {
+						if meta.Title != "" {
+							title = meta.Title
+							updateFields["audio.title"] = meta.Title
+						}
+						if meta.Artist != "" {
+							artist = meta.Artist
+							updateFields["audio.artist"] = meta.Artist
+						}
+						if len(meta.Artists) > 0 {
+							updateFields["audio.artists"] = meta.Artists
+						}
+						if meta.Album != "" {
+							album = meta.Album
+							updateFields["audio.album"] = meta.Album
+						}
+						if meta.Composer != "" {
+							updateFields["audio.composer"] = meta.Composer
+						}
+						if meta.Label != "" {
+							updateFields["audio.label"] = meta.Label
+						}
+						if meta.Genre != "" {
+							updateFields["audio.genre"] = meta.Genre
+						}
+						if meta.Year != nil {
+							updateFields["audio.year"] = *meta.Year
+						}
+						if meta.DurationSec > 0 {
+							durationSec = meta.DurationSec
+							updateFields["audio.duration_sec"] = meta.DurationSec
+						}
+						if meta.Type != "" {
+							updateFields["audio.type"] = meta.Type
+						}
+						if meta.BitDepth != nil {
+							updateFields["audio.bit_depth"] = *meta.BitDepth
+						}
+						if meta.BitrateKbps != nil {
+							updateFields["audio.bitrate_kbps"] = *meta.BitrateKbps
+						}
+						if meta.SamplingRateHz != nil {
+							updateFields["audio.sampling_rate_hz"] = *meta.SamplingRateHz
+						}
+						if meta.AlbumID != "" {
+							updateFields["audio.album_id"] = meta.AlbumID
+						}
+					}
+				} else if err != nil {
+					logEnrich.Warnf("mediainfo failed on %s: %v", trackID, err)
+				}
+			} else {
+				logEnrich.Warnf("partial download failed for track %s: %v", trackID, dlErr)
+			}
+		}
+	}
+
+	if title == "" {
+		return
+	}
+
+	// 2. Calculate and set metadata fingerprint (will include resolved album)
+	fp := BuildMetadataFingerprint(title, artist, album, durationSec)
+	if fp != "" {
+		updateFields["fingerprint"] = fp
+	}
+
+	// 3. Ensure album_id is set if album is present
+	if album != "" && updateFields["audio.album_id"] == nil && track.Audio.AlbumID == "" {
+		aid := GenerateAlbumID(album, nil)
+		if aid != "" {
+			updateFields["audio.album_id"] = aid
+		}
+	}
+
+	// 4. Fetch cover art if missing (stores in spotify, NEVER in audio)
+	if track.Spotify.CoverURL == "" {
+		coverURL, _, err := s.coverSearch.FindBestCover(ctx, title, artist, album)
+		if err == nil && coverURL != "" {
+			updateFields["spotify.cover_url"] = coverURL
+			updateFields["spotify.big_cover_url"] = coverURL
+			updateFields["spotify.cover_source"] = "itunes"
+		}
+	}
+
+	// 5. Fetch artist avatar
+	if artist != "" && track.Spotify.ArtistAvatar == "" {
+		artistCover, _ := s.coverSearch.FindArtistAvatar(ctx, artist)
+		if artistCover != "" {
+			updateFields["spotify.artist_avatar"] = artistCover
+		}
+	}
+
+	// 6. Fetch lyrics if missing (stores in root lyrics & lyrics_cache, NEVER in audio)
+	if track.Lyrics == "" {
+		res, err := s.lyricsSvc.FetchLyrics(ctx, title, artist, album)
+		if err == nil && res != nil && res.Lyrics != "" {
+			updateFields["lyrics"] = res.Lyrics
+			updateFields["lyrics_cache"] = bson.M{
+				"kind":       "lrc",
+				"source":     "lrclib",
+				"text":       res.Lyrics,
+				"updated_at": nowTs,
+			}
+		}
+	}
+
+	// 7. Ensure root titles is populated
+	if len(track.Titles) == 0 {
+		updateFields["titles"] = bson.M{
+			"original": title,
+		}
+	}
+
+	// 8. Clean unsetting of legacy / erroneous fields inside audio subdocument
+	unsetFields := bson.M{
+		"audio.titles":          "",
+		"audio.lyrics":          "",
+		"audio.cover_url":       "",
+		"audio.file_size":       "",
+		"audio.mime_type":       "",
+		"enriching":             "",
+		"enrichment_error":      "",
+		"enrichment_started_at": "",
+	}
+
+	// 9. Update track document cleanly
+	_, err = s.tracksCol.UpdateOne(ctx, bson.M{"_id": trackID}, bson.M{
+		"$set":   updateFields,
+		"$unset": unsetFields,
+	})
+	if err != nil {
+		logEnrich.Errorf("Failed to update track %s in mongo: %v", trackID, err)
+		return
+	}
+
+	// 10. Update artist entity
+	if artist != "" && s.artistsCol != nil {
+		artistID := "artist_" + strings.ToLower(NormalizeText(artist))
+		artistCover, _ := s.coverSearch.FindArtistAvatar(ctx, artist)
+		artistUpdate := bson.M{
+			"$setOnInsert": bson.M{
+				"_id":          artistID,
+				"name":         artist,
+				"match_artist": strings.ToLower(artist),
+				"created_at":   nowTs,
+			},
+			"$set": bson.M{
+				"updated_at": nowTs,
+			},
+		}
+		if artistCover != "" {
+			artistUpdate["$set"].(bson.M)["cover_url"] = artistCover
+		}
+		_, _ = s.artistsCol.UpdateOne(ctx, bson.M{"_id": artistID}, artistUpdate, options.UpdateOne().SetUpsert(true))
+	}
+
+	logEnrich.Infof("Enriched track %s (%s - %s)", trackID, artist, title)
+}

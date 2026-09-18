@@ -153,3 +153,87 @@ func readTLBytes(r io.Reader) ([]byte, error) {
 
 	return data, nil
 }
+
+// EncodeFileUniqueID encodes a document media_id into Telegram's Bot API/TDLib file_unique_id string.
+func EncodeFileUniqueID(mediaID int64) string {
+	buf := new(bytes.Buffer)
+	_ = binary.Write(buf, binary.LittleEndian, int32(2)) // FileUniqueType.DOCUMENT = 2
+	_ = binary.Write(buf, binary.LittleEndian, mediaID)
+	rle := rleEncode(buf.Bytes())
+	return base64.RawURLEncoding.EncodeToString(rle)
+}
+
+// EncodeFileID creates a Pyrogram/Bot API compatible file_id string for an audio document.
+func EncodeFileID(mediaID, accessHash int64, dcID int32, fileReference []byte) string {
+	buf := new(bytes.Buffer)
+	fileType := int32(9) // FileType.AUDIO = 9
+	if len(fileReference) > 0 {
+		fileType |= fileReferenceFlag // (1 << 25)
+	}
+
+	_ = binary.Write(buf, binary.LittleEndian, fileType)
+	_ = binary.Write(buf, binary.LittleEndian, dcID)
+
+	if len(fileReference) > 0 {
+		buf.Write(writeTLBytes(fileReference))
+	}
+
+	_ = binary.Write(buf, binary.LittleEndian, mediaID)
+	_ = binary.Write(buf, binary.LittleEndian, accessHash)
+
+	// minor=30, major=4
+	buf.WriteByte(30)
+	buf.WriteByte(4)
+
+	rle := rleEncode(buf.Bytes())
+	return base64.RawURLEncoding.EncodeToString(rle)
+}
+
+func rleEncode(src []byte) []byte {
+	var dst []byte
+	n := byte(0)
+
+	for _, b := range src {
+		if b == 0 {
+			n++
+			if n == 255 {
+				dst = append(dst, 0, n)
+				n = 0
+			}
+		} else {
+			if n > 0 {
+				dst = append(dst, 0, n)
+				n = 0
+			}
+			dst = append(dst, b)
+		}
+	}
+	if n > 0 {
+		dst = append(dst, 0, n)
+	}
+	return dst
+}
+
+func writeTLBytes(data []byte) []byte {
+	buf := new(bytes.Buffer)
+	l := len(data)
+	if l < 254 {
+		buf.WriteByte(byte(l))
+		buf.Write(data)
+		pad := (4 - ((l + 1) % 4)) % 4
+		for i := 0; i < pad; i++ {
+			buf.WriteByte(0)
+		}
+	} else {
+		buf.WriteByte(254)
+		buf.WriteByte(byte(l & 0xff))
+		buf.WriteByte(byte((l >> 8) & 0xff))
+		buf.WriteByte(byte((l >> 16) & 0xff))
+		buf.Write(data)
+		pad := (4 - (l % 4)) % 4
+		for i := 0; i < pad; i++ {
+			buf.WriteByte(0)
+		}
+	}
+	return buf.Bytes()
+}
