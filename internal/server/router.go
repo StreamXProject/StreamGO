@@ -10,9 +10,13 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
+	"streamgo/internal/api/handlers"
 	"streamgo/internal/config"
 	"streamgo/internal/database"
 	"streamgo/internal/logger"
+	"streamgo/internal/repository"
+	"streamgo/internal/services"
+	"streamgo/internal/telegram"
 )
 
 // Server encapsulates the Chi router, config, and database handle.
@@ -20,17 +24,19 @@ type Server struct {
 	Router *chi.Mux
 	Config *config.Config
 	DB     *database.Client
+	TG     *telegram.Service
 	start  time.Time
 }
 
-// New creates and configures a new HTTP router with middlewares and core routes.
-func New(cfg *config.Config, db *database.Client) *Server {
+// New creates and configures a new HTTP router with middlewares and modular routes.
+func New(cfg *config.Config, db *database.Client, tg *telegram.Service) *Server {
 	r := chi.NewRouter()
 
 	s := &Server{
 		Router: r,
 		Config: cfg,
 		DB:     db,
+		TG:     tg,
 		start:  time.Now(),
 	}
 
@@ -57,7 +63,7 @@ func New(cfg *config.Config, db *database.Client) *Server {
 		MaxAge:           300,
 	}))
 
-	// Core Routes
+	// Core System Routes
 	r.Get("/", s.handleIndex)
 	r.Get("/health", s.handleHealth)
 
@@ -69,6 +75,21 @@ func New(cfg *config.Config, db *database.Client) *Server {
 	r.Head("/redoc", s.handleRedoc)
 	r.Get("/openapi.json", s.handleOpenAPISpec)
 	r.Head("/openapi.json", s.handleOpenAPISpec)
+
+	// Mount Domain Routes when MongoDB is available
+	if db != nil {
+		trackRepo := repository.NewTrackRepository(db)
+		trackSvc := services.NewTrackService(trackRepo)
+		streamSvc := services.NewStreamService(trackRepo, tg)
+
+		trackHandler := handlers.NewTrackHandler(trackSvc)
+		topicHandler := handlers.NewTopicHandler(trackSvc)
+		streamHandler := handlers.NewStreamHandler(streamSvc)
+
+		trackHandler.Routes(r)
+		topicHandler.Routes(r)
+		streamHandler.Routes(r)
+	}
 
 	return s
 }
@@ -93,9 +114,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	tgStatus := "disabled"
+	if s.TG != nil {
+		if s.TG.IsReady() {
+			self := s.TG.Self()
+			if self != nil {
+				tgStatus = "connected (" + self.FirstName + ")"
+			} else {
+				tgStatus = "connected"
+			}
+		} else {
+			tgStatus = "connecting"
+		}
+	}
+
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"status":   "ok",
 		"database": dbStatus,
+		"telegram": tgStatus,
 		"uptime":   time.Since(s.start).String(),
 		"time":     time.Now().UTC().Format(time.RFC3339),
 	})

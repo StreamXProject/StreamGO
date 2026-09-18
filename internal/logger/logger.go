@@ -202,11 +202,11 @@ func HTTPMiddleware(enabled bool) func(next http.Handler) http.Handler {
 			)
 
 			if status >= 500 {
-				httpLog.Errorf(msg)
+				httpLog.Error(msg)
 			} else if status >= 400 {
-				httpLog.Warnf(msg)
+				httpLog.Warn(msg)
 			} else {
-				httpLog.Infof(msg)
+				httpLog.Info(msg)
 			}
 		})
 	}

@@ -71,7 +71,7 @@ func main() {
 	}
 
 	// 4. Initialize HTTP Server with Chi Router
-	srv := server.New(cfg, dbClient)
+	srv := server.New(cfg, dbClient, tgService)
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),
 		Handler:      srv.Router,

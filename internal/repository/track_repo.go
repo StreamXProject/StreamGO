@@ -1,0 +1,279 @@
+package repository
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+
+	"streamgo/internal/database"
+	"streamgo/internal/models"
+)
+
+// TrackRepository defines the data access contract for tracks and related metadata.
+type TrackRepository interface {
+	GetByID(ctx context.Context, id string) (*models.Track, error)
+	List(ctx context.Context, page, perPage int, sortField, topicName string, channelID int64) ([]*models.Track, int64, error)
+	Search(ctx context.Context, query string, limit int) ([]*models.Track, error)
+	Random(ctx context.Context, limit int, channelID int64) ([]*models.Track, error)
+	GetTopics(ctx context.Context, limit int) ([]*models.TopicItem, error)
+	GetChannelIDs(ctx context.Context) ([]int64, error)
+	IncrementPlayCount(ctx context.Context, id string) error
+}
+
+type mongoTrackRepository struct {
+	db  *database.Client
+	col *mongo.Collection
+}
+
+// NewTrackRepository creates a MongoDB-backed TrackRepository.
+func NewTrackRepository(db *database.Client) TrackRepository {
+	return &mongoTrackRepository{
+		db:  db,
+		col: db.Collection("audioTracks"),
+	}
+}
+
+func (r *mongoTrackRepository) GetByID(ctx context.Context, id string) (*models.Track, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, errors.New("track id is required")
+	}
+
+	filter := bson.M{
+		"_id":     id,
+		"deleted": bson.M{"$ne": true},
+	}
+
+	var track models.Track
+	err := r.col.FindOne(ctx, filter).Decode(&track)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to fetch track %s: %w", id, err)
+	}
+
+	return &track, nil
+}
+
+func (r *mongoTrackRepository) List(
+	ctx context.Context,
+	page, perPage int,
+	sortField, topicName string,
+	channelID int64,
+) ([]*models.Track, int64, error) {
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 || perPage > 100 {
+		perPage = 20
+	}
+
+	filter := bson.M{"deleted": bson.M{"$ne": true}}
+
+	if topicName != "" {
+		filter["topic_name"] = topicName
+	}
+	if channelID != 0 {
+		filter["source_chat_id"] = channelID
+	}
+
+	total, err := r.col.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to count tracks: %w", err)
+	}
+
+	// Default sort by updated_at descending
+	sortDoc := bson.D{{Key: "updated_at", Value: -1}}
+	if sortField == "play_count" {
+		sortDoc = bson.D{{Key: "play_count", Value: -1}, {Key: "updated_at", Value: -1}}
+	} else if sortField == "created_at" {
+		sortDoc = bson.D{{Key: "created_at", Value: -1}}
+	}
+
+	skip := int64((page - 1) * perPage)
+	opts := options.Find().
+		SetSort(sortDoc).
+		SetSkip(skip).
+		SetLimit(int64(perPage))
+
+	cursor, err := r.col.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list tracks: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var tracks []*models.Track
+	if err := cursor.All(ctx, &tracks); err != nil {
+		return nil, 0, fmt.Errorf("failed to decode tracks: %w", err)
+	}
+
+	return tracks, total, nil
+}
+
+func (r *mongoTrackRepository) Search(ctx context.Context, query string, limit int) ([]*models.Track, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []*models.Track{}, nil
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+
+	escaped := regexp.QuoteMeta(query)
+	regexPattern := bson.M{"$regex": escaped, "$options": "i"}
+
+	filter := bson.M{
+		"deleted": bson.M{"$ne": true},
+		"$or": []bson.M{
+			{"audio.title": regexPattern},
+			{"audio.artist": regexPattern},
+			{"audio.performer": regexPattern},
+			{"audio.album": regexPattern},
+		},
+	}
+
+	opts := options.Find().
+		SetSort(bson.D{{Key: "play_count", Value: -1}, {Key: "updated_at", Value: -1}}).
+		SetLimit(int64(limit))
+
+	cursor, err := r.col.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("search failed: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var tracks []*models.Track
+	if err := cursor.All(ctx, &tracks); err != nil {
+		return nil, fmt.Errorf("failed to decode search results: %w", err)
+	}
+
+	return tracks, nil
+}
+
+func (r *mongoTrackRepository) Random(ctx context.Context, limit int, channelID int64) ([]*models.Track, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+
+	match := bson.M{"deleted": bson.M{"$ne": true}}
+	if channelID != 0 {
+		match["source_chat_id"] = channelID
+	}
+
+	pipeline := mongo.Pipeline{
+		bson.D{{Key: "$match", Value: match}},
+		bson.D{{Key: "$sample", Value: bson.M{"size": limit}}},
+	}
+
+	cursor, err := r.col.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("random aggregation failed: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var tracks []*models.Track
+	if err := cursor.All(ctx, &tracks); err != nil {
+		return nil, fmt.Errorf("failed to decode random tracks: %w", err)
+	}
+
+	return tracks, nil
+}
+
+func (r *mongoTrackRepository) GetTopics(ctx context.Context, limit int) ([]*models.TopicItem, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+
+	pipeline := mongo.Pipeline{
+		bson.D{{Key: "$match", Value: bson.M{
+			"deleted":    bson.M{"$ne": true},
+			"topic_name": bson.M{"$exists": true, "$nin": []interface{}{"", nil}},
+		}}},
+		bson.D{{Key: "$group", Value: bson.M{
+			"_id":          "$topic_name",
+			"topic_id":     bson.M{"$first": "$topic_id"},
+			"tracks_count": bson.M{"$sum": 1},
+			"cover_url":    bson.M{"$first": "$spotify.cover_url"},
+		}}},
+		bson.D{{Key: "$sort", Value: bson.M{"tracks_count": -1}}},
+		bson.D{{Key: "$limit", Value: limit}},
+	}
+
+	cursor, err := r.col.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("topics aggregation failed: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var results []struct {
+		ID          string `bson:"_id"`
+		TopicID     int64  `bson:"topic_id"`
+		TracksCount int64  `bson:"tracks_count"`
+		CoverURL    string `bson:"cover_url"`
+	}
+
+	if err := cursor.All(ctx, &results); err != nil {
+		return nil, fmt.Errorf("failed to decode topics: %w", err)
+	}
+
+	topics := make([]*models.TopicItem, 0, len(results))
+	for _, res := range results {
+		topics = append(topics, &models.TopicItem{
+			TopicID:     res.TopicID,
+			TopicName:   res.ID,
+			TracksCount: res.TracksCount,
+			CoverURL:    res.CoverURL,
+		})
+	}
+
+	return topics, nil
+}
+
+func (r *mongoTrackRepository) GetChannelIDs(ctx context.Context) ([]int64, error) {
+	filter := bson.M{
+		"deleted":        bson.M{"$ne": true},
+		"source_chat_id": bson.M{"$exists": true, "$ne": 0},
+	}
+
+	distinctRes := r.col.Distinct(ctx, "source_chat_id", filter)
+	if err := distinctRes.Err(); err != nil {
+		return nil, fmt.Errorf("failed to get channel ids: %w", err)
+	}
+
+	var rawValues []interface{}
+	if err := distinctRes.Decode(&rawValues); err != nil {
+		return nil, fmt.Errorf("failed to decode channel ids: %w", err)
+	}
+
+	var channelIDs []int64
+	for _, v := range rawValues {
+		switch n := v.(type) {
+		case int64:
+			channelIDs = append(channelIDs, n)
+		case int32:
+			channelIDs = append(channelIDs, int64(n))
+		case int:
+			channelIDs = append(channelIDs, int64(n))
+		case float64:
+			channelIDs = append(channelIDs, int64(n))
+		}
+	}
+
+	return channelIDs, nil
+}
+
+func (r *mongoTrackRepository) IncrementPlayCount(ctx context.Context, id string) error {
+	filter := bson.M{"_id": id}
+	update := bson.M{
+		"$inc": bson.M{"play_count": 1},
+	}
+	_, err := r.col.UpdateOne(ctx, filter, update)
+	return err
+}
