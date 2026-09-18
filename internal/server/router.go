@@ -56,7 +56,7 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service) *Server 
 
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   corsOrigins,
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "Range"},
 		ExposedHeaders:   []string{"Link", "Content-Length", "Content-Range", "Accept-Ranges"},
 		AllowCredentials: true,
@@ -78,21 +78,45 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service) *Server 
 
 	// Mount Domain Routes when MongoDB is available
 	if db != nil {
+		// Repositories
 		trackRepo := repository.NewTrackRepository(db)
+		artistAlbumRepo := repository.NewArtistAlbumRepository(db)
+		favRepo := repository.NewFavouritePlaylistRepository(db)
+		userRepo := repository.NewUserRepository(db)
+
+		// Services
 		trackSvc := services.NewTrackService(trackRepo)
 		streamSvc := services.NewStreamService(trackRepo, tg)
+		artistAlbumSvc := services.NewArtistAlbumService(artistAlbumRepo, trackRepo)
+		favPlaylistSvc := services.NewFavouritePlaylistService(favRepo, trackRepo)
+		authSvc := services.NewAuthService(cfg, userRepo)
 
+		// Handlers
 		trackHandler := handlers.NewTrackHandler(trackSvc)
 		topicHandler := handlers.NewTopicHandler(trackSvc)
 		streamHandler := handlers.NewStreamHandler(streamSvc)
+		artistHandler := handlers.NewArtistHandler(artistAlbumSvc)
+		albumHandler := handlers.NewAlbumHandler(artistAlbumSvc)
+		favHandler := handlers.NewFavouriteHandler(favPlaylistSvc, authSvc)
+		playlistHandler := handlers.NewPlaylistHandler(favPlaylistSvc, authSvc)
+		authHandler := handlers.NewAuthHandler(cfg, authSvc)
+		mediaExtraHandler := handlers.NewMediaExtraHandler(trackSvc)
 
+		// Register routes
 		trackHandler.Routes(r)
 		topicHandler.Routes(r)
 		streamHandler.Routes(r)
+		artistHandler.Routes(r)
+		albumHandler.Routes(r)
+		favHandler.Routes(r)
+		playlistHandler.Routes(r)
+		authHandler.Routes(r)
+		mediaExtraHandler.Routes(r)
 	}
 
 	return s
 }
+
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]interface{}{

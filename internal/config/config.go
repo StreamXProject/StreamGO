@@ -22,10 +22,12 @@ type Config struct {
 	ApiID         int
 	ApiHash       string
 	BotToken      string
+	SecretKey     string
 	SessionString string
 	ChannelID     int64
 	DumpChannelID int64
 }
+
 
 // Load reads configuration from .env file (if present) and environment variables.
 func Load() *Config {
@@ -53,6 +55,7 @@ func Load() *Config {
 		ApiID:         getEnvInt("API_ID", 0),
 		ApiHash:       strings.TrimSpace(os.Getenv("API_HASH")),
 		BotToken:      strings.TrimSpace(os.Getenv("BOT_TOKEN")),
+		SecretKey:     strings.TrimSpace(os.Getenv("SECRET_KEY")),
 		SessionString: strings.TrimSpace(os.Getenv("SESSION_STRING")),
 		ChannelID:     getEnvInt64("CHANNEL_ID", 0),
 		DumpChannelID: getEnvInt64("DUMP_CHANNEL_ID", 0),

@@ -18,6 +18,7 @@ import (
 // TrackRepository defines the data access contract for tracks and related metadata.
 type TrackRepository interface {
 	GetByID(ctx context.Context, id string) (*models.Track, error)
+	GetByIDs(ctx context.Context, ids []string) ([]*models.Track, error)
 	List(ctx context.Context, page, perPage int, sortField, topicName string, channelID int64) ([]*models.Track, int64, error)
 	Search(ctx context.Context, query string, limit int) ([]*models.Track, error)
 	Random(ctx context.Context, limit int, channelID int64) ([]*models.Track, error)
@@ -25,6 +26,7 @@ type TrackRepository interface {
 	GetChannelIDs(ctx context.Context) ([]int64, error)
 	IncrementPlayCount(ctx context.Context, id string) error
 }
+
 
 type mongoTrackRepository struct {
 	db  *database.Client
@@ -61,6 +63,44 @@ func (r *mongoTrackRepository) GetByID(ctx context.Context, id string) (*models.
 
 	return &track, nil
 }
+
+func (r *mongoTrackRepository) GetByIDs(ctx context.Context, ids []string) ([]*models.Track, error) {
+	if len(ids) == 0 {
+		return []*models.Track{}, nil
+	}
+
+	filter := bson.M{
+		"_id":     bson.M{"$in": ids},
+		"deleted": bson.M{"$ne": true},
+	}
+
+	cursor, err := r.col.Find(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query tracks by IDs: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var tracks []*models.Track
+	if err := cursor.All(ctx, &tracks); err != nil {
+		return nil, fmt.Errorf("failed to decode tracks: %w", err)
+	}
+
+	// Preserve the requested order of IDs
+	trackMap := make(map[string]*models.Track, len(tracks))
+	for _, t := range tracks {
+		trackMap[t.ID] = t
+	}
+
+	ordered := make([]*models.Track, 0, len(ids))
+	for _, id := range ids {
+		if t, ok := trackMap[id]; ok {
+			ordered = append(ordered, t)
+		}
+	}
+
+	return ordered, nil
+}
+
 
 func (r *mongoTrackRepository) List(
 	ctx context.Context,
@@ -136,8 +176,14 @@ func (r *mongoTrackRepository) Search(ctx context.Context, query string, limit i
 			{"audio.artist": regexPattern},
 			{"audio.performer": regexPattern},
 			{"audio.album": regexPattern},
+			{"titles.romanized": regexPattern},
+			{"titles.original": regexPattern},
+			{"titles.translations.en": regexPattern},
+			{"audio.titles.romanized": regexPattern},
+			{"audio.titles.original": regexPattern},
 		},
 	}
+
 
 	opts := options.Find().
 		SetSort(bson.D{{Key: "play_count", Value: -1}, {Key: "updated_at", Value: -1}}).

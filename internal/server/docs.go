@@ -8,7 +8,7 @@ const openAPISpecJSON = `{
   "openapi": "3.0.3",
   "info": {
     "title": "StreamGO API",
-    "description": "High-Performance Media Streaming and Telegram Bot Backend written in Go",
+    "description": "High-Performance Media Streaming, Discovery, and Telegram MiniApp Backend written in Go",
     "version": "1.0.0"
   },
   "servers": [
@@ -17,15 +17,22 @@ const openAPISpecJSON = `{
       "description": "Current Server"
     }
   ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT / v1.<b64url>.<sig>"
+      }
+    }
+  },
   "paths": {
     "/": {
       "get": {
         "tags": ["System"],
         "summary": "Root Service Info",
         "description": "Returns basic service metadata, status, and running version.",
-        "responses": {
-          "200": { "description": "Successful Response" }
-        }
+        "responses": { "200": { "description": "Successful Response" } }
       }
     },
     "/health": {
@@ -33,9 +40,7 @@ const openAPISpecJSON = `{
         "tags": ["System"],
         "summary": "Health Check",
         "description": "Returns server uptime, current time, Telegram client state, and real-time MongoDB connectivity status.",
-        "responses": {
-          "200": { "description": "Health status response" }
-        }
+        "responses": { "200": { "description": "Health status response" } }
       }
     },
     "/tracks": {
@@ -50,9 +55,7 @@ const openAPISpecJSON = `{
           { "name": "topic", "in": "query", "schema": { "type": "string" } },
           { "name": "channel_id", "in": "query", "schema": { "type": "integer" } }
         ],
-        "responses": {
-          "200": { "description": "Paginated list of browse items" }
-        }
+        "responses": { "200": { "description": "Paginated list of browse items" } }
       }
     },
     "/tracks/{id}": {
@@ -76,9 +79,7 @@ const openAPISpecJSON = `{
           { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } },
           { "name": "channel_id", "in": "query", "schema": { "type": "integer" } }
         ],
-        "responses": {
-          "200": { "description": "Randomized selection of tracks" }
-        }
+        "responses": { "200": { "description": "Randomized selection of tracks" } }
       }
     },
     "/search": {
@@ -90,9 +91,7 @@ const openAPISpecJSON = `{
           { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } },
           { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50 } }
         ],
-        "responses": {
-          "200": { "description": "Search results matching query" }
-        }
+        "responses": { "200": { "description": "Search results matching query" } }
       }
     },
     "/topics": {
@@ -103,9 +102,7 @@ const openAPISpecJSON = `{
         "parameters": [
           { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100 } }
         ],
-        "responses": {
-          "200": { "description": "Aggregated topic list" }
-        }
+        "responses": { "200": { "description": "Aggregated topic list" } }
       }
     },
     "/topics/{name}/tracks": {
@@ -117,18 +114,14 @@ const openAPISpecJSON = `{
           { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
           { "name": "per_page", "in": "query", "schema": { "type": "integer", "default": 20 } }
         ],
-        "responses": {
-          "200": { "description": "Paginated tracks belonging to topic" }
-        }
+        "responses": { "200": { "description": "Paginated tracks belonging to topic" } }
       }
     },
     "/channelids": {
       "get": {
         "tags": ["Topics"],
         "summary": "Get Indexed Channel IDs",
-        "responses": {
-          "200": { "description": "List of indexed Telegram source channels" }
-        }
+        "responses": { "200": { "description": "List of indexed Telegram source channels" } }
       }
     },
     "/tracks/{id}/stream": {
@@ -153,8 +146,347 @@ const openAPISpecJSON = `{
         "parameters": [
           { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
+        "responses": { "200": { "description": "Audio headers available" } }
+      }
+    },
+    "/artists": {
+      "get": {
+        "tags": ["Artists"],
+        "summary": "List Artists",
+        "description": "Paginated directory of artists indexed from indexed tracks.",
+        "parameters": [
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "per_page", "in": "query", "schema": { "type": "integer", "default": 20 } }
+        ],
+        "responses": { "200": { "description": "Paginated list of artists" } }
+      }
+    },
+    "/artists/{id}": {
+      "get": {
+        "tags": ["Artists"],
+        "summary": "Get Artist Details",
+        "description": "Returns artist profile, follower count, top tracks, and discography.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
         "responses": {
-          "200": { "description": "Audio headers available" }
+          "200": { "description": "Artist detail with top tracks and albums" },
+          "404": { "description": "Artist not found" }
+        }
+      }
+    },
+    "/artists/{id}/tracks": {
+      "get": {
+        "tags": ["Artists"],
+        "summary": "Get Artist Tracks",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50 } }
+        ],
+        "responses": { "200": { "description": "Top tracks for artist" } }
+      }
+    },
+    "/albums": {
+      "get": {
+        "tags": ["Albums"],
+        "summary": "List Albums",
+        "parameters": [
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "per_page", "in": "query", "schema": { "type": "integer", "default": 20 } },
+          { "name": "artist", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Paginated album list" } }
+      }
+    },
+    "/albums/{id}": {
+      "get": {
+        "tags": ["Albums"],
+        "summary": "Get Album Details",
+        "description": "Returns album metadata and complete tracklist.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Album details and ordered tracks" },
+          "404": { "description": "Album not found" }
+        }
+      }
+    },
+    "/albums/{id}/tracks": {
+      "get": {
+        "tags": ["Albums"],
+        "summary": "Get Album Tracks",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Album tracks" } }
+      }
+    },
+    "/favourites": {
+      "get": {
+        "tags": ["Favourites"],
+        "summary": "List User Favourites",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } }
+        ],
+        "responses": { "200": { "description": "User favorite tracks" } }
+      },
+      "post": {
+        "tags": ["Favourites"],
+        "summary": "Add Track to Favourites",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["track_id"],
+                "properties": { "track_id": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Favourite saved" } }
+      }
+    },
+    "/favourites/{id}": {
+      "delete": {
+        "tags": ["Favourites"],
+        "summary": "Remove Track from Favourites",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Removed from favourites" } }
+      }
+    },
+    "/favourites/ids": {
+      "get": {
+        "tags": ["Favourites"],
+        "summary": "Get Favourite Track IDs",
+        "security": [{ "bearerAuth": [] }],
+        "responses": { "200": { "description": "List of liked track IDs" } }
+      }
+    },
+    "/history": {
+      "get": {
+        "tags": ["Favourites"],
+        "summary": "Get Listening History",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50 } }
+        ],
+        "responses": { "200": { "description": "Recent listening history" } }
+      }
+    },
+    "/listening-events": {
+      "post": {
+        "tags": ["Favourites"],
+        "summary": "Record Playback Telemetry Events",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": { "events": { "type": "array", "items": { "type": "object" } } }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Events recorded" } }
+      }
+    },
+    "/playlists": {
+      "get": {
+        "tags": ["Playlists"],
+        "summary": "List User Playlists",
+        "security": [{ "bearerAuth": [] }],
+        "responses": { "200": { "description": "List of playlists owned by user" } }
+      },
+      "post": {
+        "tags": ["Playlists"],
+        "summary": "Create Custom Playlist",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["title"],
+                "properties": {
+                  "title": { "type": "string" },
+                  "description": { "type": "string" },
+                  "cover_url": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Created playlist" } }
+      }
+    },
+    "/playlists/{id}": {
+      "get": {
+        "tags": ["Playlists"],
+        "summary": "Get Playlist by ID",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Playlist detail with tracks" } }
+      },
+      "patch": {
+        "tags": ["Playlists"],
+        "summary": "Update Playlist Metadata",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Updated playlist" } }
+      },
+      "delete": {
+        "tags": ["Playlists"],
+        "summary": "Delete Playlist",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Playlist deleted" } }
+      }
+    },
+    "/playlists/{id}/tracks": {
+      "get": {
+        "tags": ["Playlists"],
+        "summary": "Get Playlist Tracks",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Ordered tracks in playlist" } }
+      },
+      "post": {
+        "tags": ["Playlists"],
+        "summary": "Add Tracks to Playlist",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "track_id": { "type": "string" },
+                  "track_ids": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Tracks added" } }
+      }
+    },
+    "/playlists/{id}/reorder": {
+      "post": {
+        "tags": ["Playlists"],
+        "summary": "Reorder Playlist Tracks",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["track_ids"],
+                "properties": { "track_ids": { "type": "array", "items": { "type": "string" } } }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Playlist tracks reordered" } }
+      }
+    },
+    "/auth/telegram": {
+      "post": {
+        "tags": ["Authentication"],
+        "summary": "Telegram WebApp Login",
+        "description": "Verifies Telegram initData HMAC-SHA256 signature and returns user session token.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["init_data"],
+                "properties": { "init_data": { "type": "string" } }
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": ["init_data"],
+                "properties": { "init_data": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Authentication successful" },
+          "401": { "description": "Invalid Telegram signature" }
+        }
+      }
+    },
+    "/auth/telegram/widget": {
+      "post": {
+        "tags": ["Authentication"],
+        "summary": "Telegram Widget Login",
+        "description": "Authenticates user using Telegram OAuth Login Widget callback data.",
+        "responses": { "200": { "description": "Authentication successful" } }
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "tags": ["Authentication"],
+        "summary": "Current User Profile",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Current user profile" },
+          "401": { "description": "Unauthorized" }
+        }
+      }
+    },
+    "/cover/{id}": {
+      "get": {
+        "tags": ["Media"],
+        "summary": "Track Cover Redirect",
+        "description": "Redirects to the best available album artwork or thumbnail for the track.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "302": { "description": "Redirect to cover image URL" } }
+      }
+    },
+    "/tracks/{id}/lyrics": {
+      "get": {
+        "tags": ["Media"],
+        "summary": "Track Lyrics",
+        "description": "Returns synchronized or plain lyrics for a track in JSON or text/plain.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["plain", "json"] } }
+        ],
+        "responses": {
+          "200": { "description": "Lyrics content" },
+          "404": { "description": "Lyrics not found" }
         }
       }
     }
