@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -13,7 +12,10 @@ import (
 	"github.com/gotd/td/tg"
 
 	"streamgo/internal/config"
+	"streamgo/internal/logger"
 )
+
+var log = logger.New("telegram")
 
 // Service encapsulates the gotd MTProto client lifecycle.
 type Service struct {
@@ -66,13 +68,13 @@ func (s *Service) Start(ctx context.Context) error {
 
 			if !authStatus.Authorized {
 				if s.Config.BotToken != "" {
-					log.Println("[telegram] authorizing with BOT_TOKEN...")
+					log.Info("authorizing with BOT_TOKEN...")
 					if _, err := s.Client.Auth().Bot(ctx, s.Config.BotToken); err != nil {
 						return fmt.Errorf("bot authentication failed: %w", err)
 					}
-					log.Println("[telegram] bot authentication successful!")
+					log.Info("bot authentication successful!")
 				} else {
-					log.Println("[telegram] client is not authorized and no BOT_TOKEN provided")
+					log.Warn("client is not authorized and no BOT_TOKEN provided")
 				}
 			}
 
@@ -83,7 +85,7 @@ func (s *Service) Start(ctx context.Context) error {
 				s.self = self
 				s.ready = true
 				s.mu.Unlock()
-				log.Printf("[telegram] connected as: %s (ID: %d, Bot: %v)", self.FirstName, self.ID, self.Bot)
+				log.Infof("connected as: %s (ID: %d, Bot: %v)", self.FirstName, self.ID, self.Bot)
 			}
 
 			close(readyChan)
@@ -128,7 +130,7 @@ func (s *Service) Self() *tg.User {
 // Stop terminates the Telegram background loop.
 func (s *Service) Stop() {
 	if s.stopCancel != nil {
-		log.Println("[telegram] stopping client...")
+		log.Info("stopping client...")
 		s.stopCancel()
 	}
 }

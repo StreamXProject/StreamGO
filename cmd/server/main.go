@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,18 +12,21 @@ import (
 
 	"streamgo/internal/config"
 	"streamgo/internal/database"
+	"streamgo/internal/logger"
 	"streamgo/internal/server"
 	"streamgo/internal/telegram"
 )
 
+var log = logger.New("main")
+
 func main() {
-	log.Println("==================================================")
-	log.Println("        StreamGO - High Performance Media API     ")
-	log.Println("==================================================")
+	fmt.Println("==================================================")
+	fmt.Println("        StreamGO - High Performance Media API     ")
+	fmt.Println("==================================================")
 
 	// 1. Load Configuration
 	cfg := config.Load()
-	log.Printf("[main] loaded config: PORT=%s, DB=%s", cfg.Port, cfg.DatabaseName)
+	log.Infof("loaded config: PORT=%s, DB=%s, API_LOGS=%v", cfg.Port, cfg.DatabaseName, cfg.APILogs)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -36,8 +38,8 @@ func main() {
 		client, err := database.Connect(dbCtx, cfg.MongoURI, cfg.DatabaseName)
 		dbCancel()
 		if err != nil {
-			log.Printf("[main] WARNING: MongoDB connection failed: %v", err)
-			log.Println("[main] Continuing with MongoDB in disabled state...")
+			log.Warnf("MongoDB connection failed: %v", err)
+			log.Warn("Continuing with MongoDB in disabled state...")
 		} else {
 			dbClient = client
 			defer func() {
@@ -53,19 +55,19 @@ func main() {
 	if cfg.ApiID > 0 && cfg.ApiHash != "" {
 		svc, err := telegram.New(cfg)
 		if err != nil {
-			log.Printf("[main] WARNING: Failed to initialize Telegram service: %v", err)
+			log.Warnf("Failed to initialize Telegram service: %v", err)
 		} else {
 			tgService = svc
-			log.Println("[main] Starting Telegram MTProto client in background...")
+			log.Info("Starting Telegram MTProto client in background...")
 			go func() {
 				if err := tgService.Start(ctx); err != nil {
-					log.Printf("[main] Telegram client start failed: %v", err)
+					log.Errorf("Telegram client start failed: %v", err)
 				}
 			}()
 			defer tgService.Stop()
 		}
 	} else {
-		log.Println("[main] Telegram credentials (API_ID/API_HASH) not configured; skipping Telegram init.")
+		log.Info("Telegram credentials (API_ID/API_HASH) not configured; skipping Telegram init.")
 	}
 
 	// 4. Initialize HTTP Server with Chi Router
@@ -80,9 +82,9 @@ func main() {
 
 	// 5. Start HTTP Listener in a separate goroutine
 	go func() {
-		log.Printf("[main] HTTP server listening on http://0.0.0.0:%s", cfg.Port)
+		log.Infof("HTTP server listening on http://0.0.0.0:%s", cfg.Port)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("[main] HTTP server error: %v", err)
+			log.Fatalf("HTTP server error: %v", err)
 		}
 	}()
 
@@ -91,16 +93,16 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit
 
-	log.Printf("[main] received shutdown signal (%s), starting graceful shutdown...", sig)
+	log.Infof("received shutdown signal (%s), starting graceful shutdown...", sig)
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("[main] HTTP server forced shutdown error: %v", err)
+		log.Errorf("HTTP server forced shutdown error: %v", err)
 	} else {
-		log.Println("[main] HTTP server shutdown cleanly.")
+		log.Info("HTTP server shutdown cleanly.")
 	}
 
-	log.Println("[main] StreamGO stopped. Goodbye!")
+	log.Info("StreamGO stopped. Goodbye!")
 }

@@ -3,13 +3,16 @@ package database
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
+
+	"streamgo/internal/logger"
 )
+
+var log = logger.New("mongodb")
 
 // Client wraps the mongo.Client and database instance.
 type Client struct {
@@ -44,7 +47,7 @@ func Connect(ctx context.Context, uri, databaseName string) (*Client, error) {
 		return nil, fmt.Errorf("failed to ping mongodb at %s: %w", uri, err)
 	}
 
-	log.Printf("[mongodb] connected successfully to database: %s", databaseName)
+	log.Infof("connected successfully to database: %s", databaseName)
 
 	return &Client{
 		Client:   client,
@@ -64,6 +67,6 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // Close gracefully closes the connection pool.
 func (c *Client) Close(ctx context.Context) error {
-	log.Println("[mongodb] disconnecting from database...")
+	log.Info("disconnecting from database...")
 	return c.Client.Disconnect(ctx)
 }

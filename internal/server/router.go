@@ -12,6 +12,7 @@ import (
 
 	"streamgo/internal/config"
 	"streamgo/internal/database"
+	"streamgo/internal/logger"
 )
 
 // Server encapsulates the Chi router, config, and database handle.
@@ -36,7 +37,8 @@ func New(cfg *config.Config, db *database.Client) *Server {
 	// Global Middlewares
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
+	// Toggleable HTTP request logger: completely silent when APILogs is false
+	r.Use(logger.HTTPMiddleware(cfg.APILogs))
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 
