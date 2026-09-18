@@ -61,6 +61,15 @@ func New(cfg *config.Config, db *database.Client) *Server {
 	r.Get("/", s.handleIndex)
 	r.Get("/health", s.handleHealth)
 
+	// API Documentation Routes (Swagger UI & ReDoc)
+	r.Get("/docs", s.handleDocs)
+	r.Get("/docs/*", s.handleDocs)
+	r.Head("/docs", s.handleDocs)
+	r.Get("/redoc", s.handleRedoc)
+	r.Head("/redoc", s.handleRedoc)
+	r.Get("/openapi.json", s.handleOpenAPISpec)
+	r.Head("/openapi.json", s.handleOpenAPISpec)
+
 	return s
 }
 
