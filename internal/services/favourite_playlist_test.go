@@ -215,7 +215,7 @@ func (m *mockTrackRepo) Random(ctx context.Context, limit int, channelID int64) 
 	return nil, nil
 }
 
-func (m *mockTrackRepo) GetTopics(ctx context.Context, limit int) ([]*models.TopicItem, error) {
+func (m *mockTrackRepo) GetTopics(ctx context.Context, channelID int64, limit int) ([]*models.TopicItem, error) {
 	return nil, nil
 }
 

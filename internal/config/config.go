@@ -30,6 +30,7 @@ type Config struct {
 	MultiClients             bool
 	MultiClientTokens        []string
 	FilterMode               int
+	ChatTopic                string
 	CollaboratorIDs          []int64
 	Lyrics                   bool
 	LRCLIB                   bool
@@ -112,6 +113,7 @@ func Load() *Config {
 		MultiClients:             multiClients,
 		MultiClientTokens:        multiTokens,
 		FilterMode:               getEnvInt("FILTER_MODE", 0),
+		ChatTopic:                strings.TrimSpace(getEnv("CHAT_TOPIC", "all")),
 		CollaboratorIDs:          collabList,
 		Lyrics:                   getEnvBool("LYRICS", true),
 		LRCLIB:                   getEnvBool("LRCLIB", false),

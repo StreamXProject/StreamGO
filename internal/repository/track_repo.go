@@ -24,7 +24,7 @@ type TrackRepository interface {
 	List(ctx context.Context, page, perPage int, sortField, topicName string, channelID int64) ([]*models.Track, int64, error)
 	Search(ctx context.Context, query string, limit int) ([]*models.Track, error)
 	Random(ctx context.Context, limit int, channelID int64) ([]*models.Track, error)
-	GetTopics(ctx context.Context, limit int) ([]*models.TopicItem, error)
+	GetTopics(ctx context.Context, channelID int64, limit int) ([]*models.TopicItem, error)
 	GetChannelIDs(ctx context.Context) ([]int64, error)
 	IncrementPlayCount(ctx context.Context, id string) error
 	UpdateWorkerFileID(ctx context.Context, trackID, workerID, fileID string) error
@@ -290,16 +290,21 @@ func (r *mongoTrackRepository) Random(ctx context.Context, limit int, channelID 
 	return tracks, nil
 }
 
-func (r *mongoTrackRepository) GetTopics(ctx context.Context, limit int) ([]*models.TopicItem, error) {
+func (r *mongoTrackRepository) GetTopics(ctx context.Context, channelID int64, limit int) ([]*models.TopicItem, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
 
+	matchFilter := bson.M{
+		"deleted":    bson.M{"$ne": true},
+		"topic_name": bson.M{"$exists": true, "$nin": []interface{}{"", "null", "None", nil}},
+	}
+	if channelID != 0 {
+		matchFilter["source_chat_id"] = channelID
+	}
+
 	pipeline := mongo.Pipeline{
-		bson.D{{Key: "$match", Value: bson.M{
-			"deleted":    bson.M{"$ne": true},
-			"topic_name": bson.M{"$exists": true, "$nin": []interface{}{"", "null", "None", nil}},
-		}}},
+		bson.D{{Key: "$match", Value: matchFilter}},
 		bson.D{{Key: "$sort", Value: bson.D{
 			{Key: "updated_at", Value: -1},
 			{Key: "source_message_id", Value: -1},

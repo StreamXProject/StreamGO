@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -162,6 +163,35 @@ func (l *IngestionListener) handleMessage(ctx context.Context, msg *tg.Message) 
 	}
 	if topicID != 0 {
 		topicName = fmt.Sprintf("topic_%d", topicID)
+		if l.tracksCol != nil && l.tracksCol.Database() != nil {
+			ftCol := l.tracksCol.Database().Collection("forum_topics")
+			var ftDoc struct {
+				TopicName string `bson:"topic_name"`
+			}
+			err := ftCol.FindOne(ctx, bson.M{
+				"$or": []bson.M{
+					{"_id": fmt.Sprintf("%d:%d", chatID, topicID)},
+					{"topic_id": topicID},
+				},
+				"topic_name": bson.M{"$exists": true, "$ne": ""},
+			}).Decode(&ftDoc)
+			if err == nil && strings.TrimSpace(ftDoc.TopicName) != "" && !strings.HasPrefix(ftDoc.TopicName, "topic_") {
+				topicName = strings.TrimSpace(ftDoc.TopicName)
+			}
+		}
+	}
+
+	// Filter by CHAT_TOPIC if configured
+	if l.cfg != nil && l.cfg.ChatTopic != "" && l.cfg.ChatTopic != "all" {
+		if l.cfg.ChatTopic == "0" {
+			if topicID != 0 {
+				return
+			}
+		} else if targetID, err := strconv.ParseInt(l.cfg.ChatTopic, 10, 64); err == nil {
+			if int64(topicID) != targetID {
+				return
+			}
+		}
 	}
 
 	// Source and Cache Message / Chat IDs (handle forwards properly)

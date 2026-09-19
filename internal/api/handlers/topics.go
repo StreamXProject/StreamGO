@@ -31,8 +31,9 @@ func (h *TopicHandler) Routes(r chi.Router) {
 // ListTopics handles GET /topics.
 func (h *TopicHandler) ListTopics(w http.ResponseWriter, r *http.Request) {
 	limit := api.ParseQueryInt(r, "limit", 100)
+	channelID := api.ParseQueryInt64(r, "channel_id", 0)
 
-	resp, err := h.trackService.GetTopics(r.Context(), limit)
+	resp, err := h.trackService.GetTopics(r.Context(), channelID, limit)
 	if err != nil {
 		api.RespondError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -104,8 +104,8 @@ func (s *TrackService) GetRandom(ctx context.Context, limit int, channelID int64
 }
 
 // GetTopics returns aggregated topic lists with counts matching Api/schemas/topics.py.
-func (s *TrackService) GetTopics(ctx context.Context, limit int) (*models.TopicsResponse, error) {
-	topics, err := s.repo.GetTopics(ctx, limit)
+func (s *TrackService) GetTopics(ctx context.Context, channelID int64, limit int) (*models.TopicsResponse, error) {
+	topics, err := s.repo.GetTopics(ctx, channelID, limit)
 	if err != nil {
 		return nil, err
 	}
