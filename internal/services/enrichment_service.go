@@ -37,6 +37,7 @@ type EnrichmentService struct {
 	downloader  MediaDownloader
 
 	workQueue chan string
+	inFlight  sync.Map
 	wg        sync.WaitGroup
 }
 
@@ -70,9 +71,17 @@ func (s *EnrichmentService) SetDownloader(d MediaDownloader) {
 
 // TriggerEnrich pushes a track ID to the priority enrichment queue.
 func (s *EnrichmentService) TriggerEnrich(trackID string) {
+	trackID = strings.TrimSpace(trackID)
+	if trackID == "" {
+		return
+	}
+	if _, loaded := s.inFlight.LoadOrStore(trackID, struct{}{}); loaded {
+		return // already queued or currently being enriched
+	}
 	select {
 	case s.workQueue <- trackID:
 	default:
+		s.inFlight.Delete(trackID)
 		logEnrich.Warnf("enrichment queue full, dropping immediate trigger for %s", trackID)
 	}
 }
@@ -112,9 +121,15 @@ func (s *EnrichmentService) pollLoop(ctx context.Context) {
 }
 
 func (s *EnrichmentService) enqueueUnenrichedTracks(ctx context.Context) {
+	staleThreshold := float64(time.Now().Unix() - 300) // 5 minutes
 	filter := bson.M{
 		"enriched": bson.M{"$ne": true},
 		"deleted":  bson.M{"$ne": true},
+		"$or": []bson.M{
+			{"enriching": bson.M{"$ne": true}},
+			{"enrichment_started_at": bson.M{"$lt": staleThreshold}},
+			{"enrichment_started_at": bson.M{"$exists": false}},
+		},
 	}
 	opts := options.Find().SetLimit(50).SetProjection(bson.M{"_id": 1})
 
@@ -129,9 +144,13 @@ func (s *EnrichmentService) enqueueUnenrichedTracks(ctx context.Context) {
 			ID string `bson:"_id"`
 		}
 		if err := cursor.Decode(&doc); err == nil && doc.ID != "" {
+			if _, loaded := s.inFlight.LoadOrStore(doc.ID, struct{}{}); loaded {
+				continue // already in flight
+			}
 			select {
 			case s.workQueue <- doc.ID:
 			default:
+				s.inFlight.Delete(doc.ID)
 				return
 			}
 		}
@@ -152,9 +171,38 @@ func (s *EnrichmentService) workerLoop(ctx context.Context, workerID int) {
 }
 
 func (s *EnrichmentService) enrichSingleTrack(ctx context.Context, trackID string) {
+	defer s.inFlight.Delete(trackID)
+
+	now := float64(time.Now().Unix())
+	staleThreshold := now - 300
+
+	// Atomically claim the track so no other worker or poller can process it concurrently
+	claimFilter := bson.M{
+		"_id":      trackID,
+		"enriched": bson.M{"$ne": true},
+		"deleted":  bson.M{"$ne": true},
+		"$or": []bson.M{
+			{"enriching": bson.M{"$ne": true}},
+			{"enrichment_started_at": bson.M{"$lt": staleThreshold}},
+			{"enrichment_started_at": bson.M{"$exists": false}},
+		},
+	}
+	claimUpdate := bson.M{
+		"$set": bson.M{
+			"enriching":             true,
+			"enrichment_started_at": now,
+		},
+	}
+
 	var track models.Track
-	err := s.tracksCol.FindOne(ctx, bson.M{"_id": trackID}).Decode(&track)
+	err := s.tracksCol.FindOneAndUpdate(
+		ctx,
+		claimFilter,
+		claimUpdate,
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&track)
 	if err != nil {
+		// Already enriched, deleted, or claimed by another concurrent worker
 		return
 	}
 
