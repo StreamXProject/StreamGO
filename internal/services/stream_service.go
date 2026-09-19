@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -23,7 +24,10 @@ import (
 
 var logStream = logger.New("stream")
 
-var rangeRegex = regexp.MustCompile(`^bytes=(\d*)-(\d*)$`)
+var rangeRegex = regexp.MustCompile(`(?i)^bytes\s*=\s*(\d*)\s*-\s*(\d*)$`)
+
+// ErrRangeNotSatisfiable is returned when the requested byte range is outside the file bounds.
+var ErrRangeNotSatisfiable = errors.New("range not satisfiable")
 
 // StreamService coordinates audio range parsing and streaming.
 type StreamService struct {
@@ -64,14 +68,14 @@ func ParseRange(rangeHeader string, totalSize int64) (*ByteRange, error) {
 		return nil, fmt.Errorf("invalid range format: %s", rangeHeader)
 	}
 
-	startStr := matches[1]
-	endStr := matches[2]
-
-	var start, end int64
+	startStr := strings.TrimSpace(matches[1])
+	endStr := strings.TrimSpace(matches[2])
 
 	if startStr == "" && endStr == "" {
 		return nil, fmt.Errorf("empty range boundaries")
 	}
+
+	var start, end int64
 
 	if startStr == "" {
 		n, err := strconv.ParseInt(endStr, 10, 64)
@@ -103,8 +107,8 @@ func ParseRange(rangeHeader string, totalSize int64) (*ByteRange, error) {
 		}
 	}
 
-	if start >= totalSize {
-		return nil, fmt.Errorf("range start %d out of bounds (total: %d)", start, totalSize)
+	if totalSize > 0 && start >= totalSize {
+		return nil, ErrRangeNotSatisfiable
 	}
 
 	return &ByteRange{
@@ -158,7 +162,11 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 		f, err := os.Open(cacheFile)
 		if err == nil {
 			defer f.Close()
-			w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, filename))
+			if w.Header().Get("Content-Disposition") == "" {
+				fallback := strings.ReplaceAll(filename, `"`, `_`)
+				encoded := url.QueryEscape(filename)
+				w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"; filename*=UTF-8''%s`, fallback, encoded))
+			}
 			http.ServeContent(w, r, filename, info.ModTime(), f)
 			return
 		}
@@ -170,17 +178,22 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 	if rangeHeader != "" {
 		var err error
 		byteRange, err = ParseRange(rangeHeader, totalSize)
-		if err != nil {
+		if errors.Is(err, ErrRangeNotSatisfiable) {
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", totalSize))
 			http.Error(w, "Requested Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
+		// If err != nil (malformed syntax), RFC 7233 says ignore Range and serve full content (byteRange == nil)
 	}
 
 	// 5. Setup Response Headers
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Type", mimeType)
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, filename))
+	if w.Header().Get("Content-Disposition") == "" {
+		fallback := strings.ReplaceAll(filename, `"`, `_`)
+		encoded := url.QueryEscape(filename)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"; filename*=UTF-8''%s`, fallback, encoded))
+	}
 
 	status := http.StatusOK
 	var contentLength int64 = totalSize
@@ -217,50 +230,6 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 	s.streamFromTelegram(ctx, w, track, byteRange, totalSize)
 }
 
-type rangeWriter struct {
-	w       io.Writer
-	skip    int64
-	remain  int64
-	flusher http.Flusher
-}
-
-func (rw *rangeWriter) Write(p []byte) (int, error) {
-	if rw.remain <= 0 {
-		return 0, io.EOF
-	}
-
-	n := len(p)
-	if rw.skip > 0 {
-		if int64(n) <= rw.skip {
-			rw.skip -= int64(n)
-			return n, nil
-		}
-		p = p[rw.skip:]
-		rw.skip = 0
-	}
-
-	toWrite := p
-	if int64(len(toWrite)) > rw.remain {
-		toWrite = toWrite[:rw.remain]
-	}
-
-	written, err := rw.w.Write(toWrite)
-	rw.remain -= int64(written)
-
-	if rw.flusher != nil {
-		rw.flusher.Flush()
-	}
-
-	if err != nil {
-		return written, err
-	}
-	if rw.remain <= 0 {
-		return n, io.EOF
-	}
-
-	return n, nil
-}
-
 func (s *StreamService) streamFromTelegram(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -278,7 +247,77 @@ func (s *StreamService) streamFromTelegram(
 
 	logStream.Infof("streaming track %s: offset=%d, length=%d", track.ID, startOffset, bytesRemaining)
 
-	fileID := track.Telegram.FileID
+	// 1. Prefer acquiring a worker that already has a mapped file_id
+	var worker *telegram.ClientWorker
+	workers := s.tgService.Workers()
+	if track.Telegram.FileIDs != nil {
+		for _, w := range workers {
+			if w.Ready {
+				wID := strconv.FormatInt(w.ID, 10)
+				if wID == "0" || wID == "" {
+					if parts := strings.Split(w.Token, ":"); len(parts) > 0 {
+						wID = parts[0]
+					}
+				}
+				if fid, ok := track.Telegram.FileIDs[wID]; ok && fid != "" {
+					worker = s.tgService.AcquireWorkerForBot(wID)
+					break
+				}
+			}
+		}
+	}
+	if worker == nil {
+		worker = s.tgService.AcquireWorker()
+	}
+	defer s.tgService.ReleaseWorker(worker)
+
+	workerIDStr := strconv.FormatInt(worker.ID, 10)
+	if workerIDStr == "0" || workerIDStr == "" {
+		if parts := strings.Split(worker.Token, ":"); len(parts) > 0 {
+			workerIDStr = parts[0]
+		}
+	}
+
+	fileID := ""
+	if track.Telegram.FileIDs != nil && workerIDStr != "0" {
+		fileID = track.Telegram.FileIDs[workerIDStr]
+	}
+
+	fetchFresh := func() string {
+		if worker.Ready && track.CacheChatID != 0 && track.CacheMessageID != 0 {
+			if fid, err := worker.FetchFileIDForMessage(ctx, track.CacheChatID, track.CacheMessageID); err == nil && fid != "" {
+				go func(tid, wid, f string) {
+					_ = s.repo.UpdateWorkerFileID(context.Background(), tid, wid, f)
+				}(track.ID, workerIDStr, fid)
+				return fid
+			}
+		}
+		if worker.Ready && track.SourceChatID != 0 && track.SourceMessageID != 0 {
+			if fid, err := worker.FetchFileIDForMessage(ctx, track.SourceChatID, track.SourceMessageID); err == nil && fid != "" {
+				go func(tid, wid, f string) {
+					_ = s.repo.UpdateWorkerFileID(context.Background(), tid, wid, f)
+				}(track.ID, workerIDStr, fid)
+				return fid
+			}
+		}
+		return ""
+	}
+
+	// Fallback: If this worker does not have a cached file_id, fetch on the fly
+	if fileID == "" {
+		fileID = fetchFresh()
+		if fileID == "" && track.Telegram.FileID != "" {
+			primary := s.tgService.PrimaryWorker()
+			if primary != nil && primary.Ready && primary != worker {
+				s.tgService.ReleaseWorker(worker)
+				worker = primary
+				workerIDStr = strconv.FormatInt(worker.ID, 10)
+				atomic.AddInt64(&worker.Workload, 1)
+			}
+			fileID = track.Telegram.FileID
+		}
+	}
+
 	if fileID == "" {
 		logStream.Errorf("track %s has no telegram file_id", track.ID)
 		return
@@ -297,20 +336,131 @@ func (s *StreamService) streamFromTelegram(
 	}
 
 	flusher, _ := w.(http.Flusher)
-	rw := &rangeWriter{
-		w:       w,
-		skip:    startOffset,
-		remain:  bytesRemaining,
-		flusher: flusher,
-	}
 
-	worker := s.tgService.AcquireWorker()
-	defer s.tgService.ReleaseWorker(worker)
+	// MTProto UploadGetFile requires offset to be divisible by 4096 (4KB),
+	// and no request may cross a 1MB (1048576 byte) boundary.
+	const maxChunkSize = 512 * 1024 // 512 KB
+	const oneMB int64 = 1024 * 1024
+	chunkOffset := (startOffset / 4096) * 4096
+	skipBytes := startOffset - chunkOffset
+	refreshed := false
 
-	downloader := worker.Client.Downloader()
-	_, err = downloader.Download(worker.API, location).Stream(ctx, rw)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
-		logStream.Warnf("streaming ended with error for track %s: %v", track.ID, err)
+	for bytesRemaining > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Calculate maximum allowed limit up to the next 1MB boundary
+		bytesToBoundary := oneMB - (chunkOffset % oneMB)
+		currentLimit := maxChunkSize
+		if int64(currentLimit) > bytesToBoundary {
+			currentLimit = int(bytesToBoundary)
+		}
+
+		req := &tg.UploadGetFileRequest{
+			Precise:  true,
+			Location: location,
+			Offset:   chunkOffset,
+			Limit:    currentLimit,
+		}
+
+		var res tg.UploadFileClass
+		var fetchErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			res, fetchErr = worker.API.UploadGetFile(ctx, req)
+			if fetchErr == nil {
+				break
+			}
+			if !refreshed && strings.Contains(strings.ToUpper(fetchErr.Error()), "FILE_REFERENCE") {
+				logStream.Warnf("File reference expired for track %s at offset %d; refreshing...", track.ID, chunkOffset)
+				if fresh := fetchFresh(); fresh != "" {
+					if freshDecoded, freshErr := telegram.DecodeFileID(fresh); freshErr == nil {
+						location = &tg.InputDocumentFileLocation{
+							ID:            freshDecoded.MediaID,
+							AccessHash:    freshDecoded.AccessHash,
+							FileReference: freshDecoded.FileReference,
+						}
+						req.Location = location
+						refreshed = true
+						continue
+					}
+				}
+			}
+			if errors.Is(fetchErr, context.Canceled) || ctx.Err() != nil {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		if fetchErr != nil {
+			logStream.Warnf("UploadGetFile failed after retries for track %s at offset %d: %v", track.ID, chunkOffset, fetchErr)
+			return
+		}
+
+		var data []byte
+		switch f := res.(type) {
+		case *tg.UploadFile:
+			data = f.Bytes
+		default:
+			logStream.Warnf("unexpected UploadGetFile result type %T for track %s", res, track.ID)
+			return
+		}
+
+		rawLen := len(data)
+		if rawLen == 0 {
+			// Telegram EOF reached
+			break
+		}
+
+		// Handle sub-4KB unaligned start offset on first chunk
+		if skipBytes > 0 {
+			if int64(rawLen) <= skipBytes {
+				skipBytes -= int64(rawLen)
+				chunkOffset += int64(rawLen)
+				continue
+			}
+			data = data[skipBytes:]
+			skipBytes = 0
+		}
+
+		// Cap data to bytesRemaining
+		if int64(len(data)) > bytesRemaining {
+			data = data[:bytesRemaining]
+		}
+
+		written, writeErr := w.Write(data)
+		if flusher != nil {
+			flusher.Flush()
+		}
+		if writeErr != nil {
+			// Client disconnected (e.g. stopped playback, navigated away, or seeked)
+			return
+		}
+
+		bytesRemaining -= int64(written)
+		chunkOffset += int64(rawLen)
+
+		// If Telegram returned fewer bytes than requested limit, it was the final chunk of the file
+		if rawLen < currentLimit {
+			break
+		}
 	}
 }
+
+// GetTrack retrieves a track by ID.
+func (s *StreamService) GetTrack(ctx context.Context, id string) (*models.Track, error) {
+	return s.repo.GetByID(ctx, id)
+}
+
+// WarmTrack pre-resolves track information and checks Telegram worker availability.
+func (s *StreamService) WarmTrack(ctx context.Context, id string) {
+	track, err := s.repo.GetByID(ctx, id)
+	if err != nil || track == nil {
+		return
+	}
+	logStream.Infof("Prewarming track %s (%s - %s)", track.ID, track.Audio.Artist, track.Audio.Title)
+}
+
 

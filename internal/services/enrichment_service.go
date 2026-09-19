@@ -20,9 +20,10 @@ import (
 
 var logEnrich = logger.New("enrichment")
 
-// MediaDownloader downloads partial media bytes for an indexed file_id.
+// MediaDownloader downloads partial media bytes for an indexed file_id or track.
 type MediaDownloader interface {
 	DownloadPartialByFileID(ctx context.Context, fileID string, maxBytes int64, w io.Writer) error
+	DownloadPartialForTrack(ctx context.Context, track *models.Track, maxBytes int64, w io.Writer, onRefreshed func(botID, fileID string)) error
 }
 
 // EnrichmentService runs background worker goroutines to enrich track metadata.
@@ -161,6 +162,7 @@ func (s *EnrichmentService) enrichSingleTrack(ctx context.Context, trackID strin
 	artist := track.EffectiveArtist()
 	album := track.Audio.Album
 	durationSec := track.Audio.DurationSec
+	year := track.Audio.Year
 
 	nowTs := float64(time.Now().Unix())
 	updateFields := bson.M{
@@ -170,11 +172,18 @@ func (s *EnrichmentService) enrichSingleTrack(ctx context.Context, trackID strin
 	}
 
 	// 1. Partial Media Download & MediaInfo extraction (matching Python StreamXBot)
-	if s.downloader != nil && track.Telegram.FileID != "" {
+	if s.downloader != nil {
 		tmpFile, err := os.CreateTemp("", fmt.Sprintf("streamgo_mi_%s_*.part", track.ID))
 		if err == nil {
 			tmpPath := tmpFile.Name()
-			dlErr := s.downloader.DownloadPartialByFileID(ctx, track.Telegram.FileID, 2_000_000, tmpFile)
+			dlErr := s.downloader.DownloadPartialForTrack(ctx, &track, 2_000_000, tmpFile, func(botID, fileID string) {
+				_ = s.tracksCol.FindOneAndUpdate(ctx, bson.M{"_id": trackID}, bson.M{
+					"$set": bson.M{
+						fmt.Sprintf("telegram.file_ids.%s", botID): fileID,
+						"updated_at": float64(time.Now().Unix()),
+					},
+				})
+			})
 			tmpFile.Close()
 			defer os.Remove(tmpPath)
 
@@ -213,6 +222,7 @@ func (s *EnrichmentService) enrichSingleTrack(ctx context.Context, trackID strin
 							updateFields["audio.genre"] = meta.Genre
 						}
 						if meta.Year != nil {
+							year = meta.Year
 							updateFields["audio.year"] = *meta.Year
 						}
 						if meta.DurationSec > 0 {
@@ -233,6 +243,8 @@ func (s *EnrichmentService) enrichSingleTrack(ctx context.Context, trackID strin
 						}
 						if meta.AlbumID != "" {
 							updateFields["audio.album_id"] = meta.AlbumID
+						} else if album != "" {
+							updateFields["audio.album_id"] = GenerateAlbumID(album, year)
 						}
 					}
 				} else if err != nil {
@@ -256,7 +268,7 @@ func (s *EnrichmentService) enrichSingleTrack(ctx context.Context, trackID strin
 
 	// 3. Ensure album_id is set if album is present
 	if album != "" && updateFields["audio.album_id"] == nil && track.Audio.AlbumID == "" {
-		aid := GenerateAlbumID(album, nil)
+		aid := GenerateAlbumID(album, year)
 		if aid != "" {
 			updateFields["audio.album_id"] = aid
 		}
@@ -280,30 +292,48 @@ func (s *EnrichmentService) enrichSingleTrack(ctx context.Context, trackID strin
 		}
 	}
 
-	// 6. Fetch lyrics if missing (stores in root lyrics & lyrics_cache, NEVER in audio)
-	if track.Lyrics == "" {
+	// 6. Fetch lyrics and multilingual/romanized titles
+	if s.lyricsSvc != nil {
 		res, err := s.lyricsSvc.FetchLyrics(ctx, title, artist, album)
-		if err == nil && res != nil && res.Lyrics != "" {
-			updateFields["lyrics"] = res.Lyrics
-			updateFields["lyrics_cache"] = bson.M{
-				"kind":       "lrc",
-				"source":     "lrclib",
-				"text":       res.Lyrics,
-				"updated_at": nowTs,
+		if err == nil && res != nil {
+			if res.Lyrics != "" && (track.Lyrics == "" || track.LyricsCache == nil || track.LyricsCache["kind"] != "richsync") {
+				updateFields["lyrics"] = res.Lyrics
+				kind := res.Kind
+				if kind == "" {
+					kind = "lrc"
+				}
+				source := res.Source
+				if source == "" {
+					source = "musixmatch"
+				}
+				updateFields["lyrics_cache"] = bson.M{
+					"kind":       kind,
+					"source":     source,
+					"text":       res.Lyrics,
+					"updated_at": nowTs,
+				}
+			}
+			if len(res.Titles) > 0 {
+				updateFields["titles"] = res.Titles
+				updateFields["audio.titles"] = res.Titles
 			}
 		}
 	}
 
-	// 7. Ensure root titles is populated
-	if len(track.Titles) == 0 {
-		updateFields["titles"] = bson.M{
-			"original": title,
+	// 7. Ensure titles and audio.titles are populated
+	if updateFields["titles"] == nil {
+		if len(track.Titles) > 0 {
+			updateFields["audio.titles"] = track.Titles
+		} else {
+			updateFields["titles"] = bson.M{"original": title}
+			updateFields["audio.titles"] = bson.M{"original": title}
 		}
+	} else if updateFields["audio.titles"] == nil {
+		updateFields["audio.titles"] = updateFields["titles"]
 	}
 
-	// 8. Clean unsetting of legacy / erroneous fields inside audio subdocument
+	// 8. Clean unsetting of legacy / erroneous fields inside audio subdocument (preserving audio.titles!)
 	unsetFields := bson.M{
-		"audio.titles":          "",
 		"audio.lyrics":          "",
 		"audio.cover_url":       "",
 		"audio.file_size":       "",

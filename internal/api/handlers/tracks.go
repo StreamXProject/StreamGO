@@ -25,7 +25,10 @@ func (h *TrackHandler) Routes(r chi.Router) {
 	r.Get("/tracks", h.List)
 	r.Get("/browse", h.List)
 	r.Get("/search", h.Search)
+	r.Get("/tracks/search", h.Search)
 	r.Get("/tracks/random", h.Random)
+	r.Get("/tracks/shuffle", h.Random)
+	r.Get("/library/shuffle", h.Random)
 	r.Get("/tracks/{id}", h.GetByID)
 }
 

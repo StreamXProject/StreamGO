@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
+	"streamgo/internal/api"
 	"streamgo/internal/api/handlers"
 	"streamgo/internal/config"
 	"streamgo/internal/database"
@@ -19,25 +23,34 @@ import (
 	"streamgo/internal/telegram"
 )
 
+var log = logger.New("server")
+
 // Server encapsulates the Chi router, config, and database handle.
 type Server struct {
-	Router *chi.Mux
-	Config *config.Config
-	DB     *database.Client
-	TG     *telegram.Service
-	start  time.Time
+	Router  *chi.Mux
+	Config  *config.Config
+	DB      *database.Client
+	TG      *telegram.Service
+	distDir string
+	start   time.Time
 }
 
 // New creates and configures a new HTTP router with middlewares and modular routes.
-func New(cfg *config.Config, db *database.Client, tg *telegram.Service) *Server {
+func New(cfg *config.Config, db *database.Client, tg *telegram.Service, filter *services.AccessFilter) *Server {
 	r := chi.NewRouter()
 
+	distDir := resolveDistDir()
+	if distDir != "" {
+		log.Infof("[spa] WebX frontend detected and mounted from: %s", distDir)
+	}
+
 	s := &Server{
-		Router: r,
-		Config: cfg,
-		DB:     db,
-		TG:     tg,
-		start:  time.Now(),
+		Router:  r,
+		Config:  cfg,
+		DB:      db,
+		TG:      tg,
+		distDir: distDir,
+		start:   time.Now(),
 	}
 
 	// Global Middlewares
@@ -46,7 +59,6 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service) *Server 
 	// Toggleable HTTP request logger: completely silent when APILogs is false
 	r.Use(logger.HTTPMiddleware(cfg.APILogs))
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
 
 	// CORS Configuration
 	corsOrigins := []string{"*"}
@@ -57,14 +69,18 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service) *Server 
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   corsOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "Range"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "Range", "X-Secret-Key", "X-Auth-Token"},
 		ExposedHeaders:   []string{"Link", "Content-Length", "Content-Range", "Accept-Ranges"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
 
+	// Intercept browser HTML navigations to serve WebX frontend SPA shell
+	r.Use(s.SPAMiddleware)
+
 	// Core System Routes
 	r.Get("/", s.handleIndex)
+	r.Head("/", s.handleIndex)
 	r.Get("/health", s.handleHealth)
 
 	// API Documentation Routes (Swagger UI & ReDoc)
@@ -83,13 +99,21 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service) *Server 
 		artistAlbumRepo := repository.NewArtistAlbumRepository(db)
 		favRepo := repository.NewFavouritePlaylistRepository(db)
 		userRepo := repository.NewUserRepository(db)
+		historyRepo := repository.NewHistoryRepository(db)
+		dailyRepo := repository.NewDailyPlaylistRepository(db)
+		accessRepo := repository.NewAccessControlRepository(db)
 
 		// Services
 		trackSvc := services.NewTrackService(trackRepo)
 		streamSvc := services.NewStreamService(trackRepo, tg)
 		artistAlbumSvc := services.NewArtistAlbumService(artistAlbumRepo, trackRepo)
-		favPlaylistSvc := services.NewFavouritePlaylistService(favRepo, trackRepo)
+		favPlaylistSvc := services.NewFavouritePlaylistService(favRepo, trackRepo, artistAlbumRepo)
 		authSvc := services.NewAuthService(cfg, userRepo)
+		authSvc.SetAccessControlRepository(accessRepo)
+		discordSvc := services.NewDiscordService()
+		histSvc := services.NewHistoryService(historyRepo, trackRepo)
+		dailySvc := services.NewDailyPlaylistService(dailyRepo, trackRepo)
+		accessSvc := services.NewAccessControlService(accessRepo)
 
 		// Handlers
 		trackHandler := handlers.NewTrackHandler(trackSvc)
@@ -101,6 +125,12 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service) *Server 
 		playlistHandler := handlers.NewPlaylistHandler(favPlaylistSvc, authSvc)
 		authHandler := handlers.NewAuthHandler(cfg, authSvc)
 		mediaExtraHandler := handlers.NewMediaExtraHandler(trackSvc)
+		sourcesHandler := handlers.NewSourcesHandler(cfg, filter, authSvc)
+		discordHandler := handlers.NewDiscordHandler(discordSvc)
+		historyHandler := handlers.NewHistoryHandler(histSvc, authSvc)
+		dailyHandler := handlers.NewDailyPlaylistHandler(dailySvc, authSvc)
+		accessHandler := handlers.NewAccessControlHandler(accessSvc, authSvc, cfg)
+		shareHandler := handlers.NewShareHandler(trackRepo, favRepo, cfg)
 
 		// Register routes
 		trackHandler.Routes(r)
@@ -112,13 +142,64 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service) *Server 
 		playlistHandler.Routes(r)
 		authHandler.Routes(r)
 		mediaExtraHandler.Routes(r)
+		sourcesHandler.Routes(r)
+		discordHandler.Routes(r)
+		historyHandler.Routes(r)
+		dailyHandler.Routes(r)
+		accessHandler.Routes(r)
+		shareHandler.Routes(r)
 	}
+
+	// SPA & Static Asset Catch-All Handler
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		if isAPIOrReservedPath(r.URL.Path) {
+			api.RespondError(w, http.StatusNotFound, "route not found")
+			return
+		}
+
+		if s.distDir != "" {
+			cleanPath := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
+			if cleanPath != "" && cleanPath != "." {
+				targetPath := filepath.Join(s.distDir, cleanPath)
+				if info, err := os.Stat(targetPath); err == nil && !info.IsDir() {
+					if cleanPath == "sw.js" || cleanPath == "manifest.json" {
+						w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+					} else if strings.HasPrefix(cleanPath, "assets/") {
+						w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+					}
+					http.ServeFile(w, r, targetPath)
+					return
+				}
+			}
+
+			// Single Page Application Navigation: Return index.html for GET/HEAD
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				indexFile := filepath.Join(s.distDir, "index.html")
+				if _, err := os.Stat(indexFile); err == nil {
+					w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+					w.Header().Set("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
+					http.ServeFile(w, r, indexFile)
+					return
+				}
+			}
+		}
+
+		api.RespondError(w, http.StatusNotFound, "route not found")
+	})
 
 	return s
 }
 
-
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if s.distDir != "" {
+		indexFile := filepath.Join(s.distDir, "index.html")
+		if _, err := os.Stat(indexFile); err == nil {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			w.Header().Set("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
+			http.ServeFile(w, r, indexFile)
+			return
+		}
+	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"service": "StreamGO",
 		"status":  "running",

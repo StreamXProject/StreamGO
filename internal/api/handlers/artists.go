@@ -30,12 +30,13 @@ func (h *ArtistHandler) Routes(r chi.Router) {
 // List handles GET /artists with pagination.
 func (h *ArtistHandler) List(w http.ResponseWriter, r *http.Request) {
 	page := api.ParseQueryInt(r, "page", 1)
-	perPage := api.ParseQueryInt(r, "per_page", 20)
+	perPage := api.ParseQueryInt(r, "per_page", 50)
 	if limit := api.ParseQueryInt(r, "limit", 0); limit > 0 {
 		perPage = limit
 	}
+	refresh := api.ParseQueryBool(r, "refresh", false)
 
-	resp, err := h.svc.ListArtists(r.Context(), page, perPage)
+	resp, err := h.svc.ListArtists(r.Context(), page, perPage, refresh)
 	if err != nil {
 		api.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -73,16 +74,23 @@ func (h *ArtistHandler) GetTracks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := api.ParseQueryInt(r, "limit", 50)
-	tracks, err := h.svc.GetArtistTracks(r.Context(), id, limit)
+	page := api.ParseQueryInt(r, "page", 1)
+	perPage := api.ParseQueryInt(r, "per_page", 50)
+	if limit := api.ParseQueryInt(r, "limit", 0); limit > 0 {
+		perPage = limit
+	}
+
+	tracks, total, err := h.svc.GetArtistTracksPaginated(r.Context(), id, page, perPage)
 	if err != nil {
 		api.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	api.RespondJSON(w, http.StatusOK, map[string]any{
-		"ok":    true,
-		"total": len(tracks),
-		"items": tracks,
+		"ok":       true,
+		"page":     page,
+		"per_page": perPage,
+		"total":    total,
+		"items":    tracks,
 	})
 }

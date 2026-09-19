@@ -55,12 +55,21 @@ func (s *TrackService) Browse(
 		totalPages = int(math.Ceil(float64(total) / float64(perPage)))
 	}
 
+	coverURL := ""
+	for _, item := range items {
+		if item.CoverURL != "" {
+			coverURL = item.CoverURL
+			break
+		}
+	}
+
 	return &models.BrowseResponse{
 		Items:      items,
 		Total:      total,
 		Page:       page,
 		PerPage:    perPage,
 		TotalPages: totalPages,
+		CoverURL:   coverURL,
 	}, nil
 }
 
@@ -94,17 +103,23 @@ func (s *TrackService) GetRandom(ctx context.Context, limit int, channelID int64
 	return items, nil
 }
 
-// GetTopics returns aggregated topic lists with counts.
+// GetTopics returns aggregated topic lists with counts matching Api/schemas/topics.py.
 func (s *TrackService) GetTopics(ctx context.Context, limit int) (*models.TopicsResponse, error) {
 	topics, err := s.repo.GetTopics(ctx, limit)
 	if err != nil {
 		return nil, err
 	}
 
+	topicNames := make([]string, 0, len(topics))
+	for _, t := range topics {
+		topicNames = append(topicNames, t.TopicName)
+	}
+
 	return &models.TopicsResponse{
-		OK:    true,
-		Total: len(topics),
-		Items: topics,
+		OK:     true,
+		Total:  len(topics),
+		Items:  topics,
+		Topics: topicNames,
 	}, nil
 }
 

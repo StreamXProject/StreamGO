@@ -21,7 +21,7 @@ type AudioMeta struct {
 	Performer string         `bson:"performer,omitempty" json:"performer,omitempty"`
 	CoverURL  string         `bson:"-" json:"cover_url,omitempty"`
 	Lyrics    string         `bson:"-" json:"lyrics,omitempty"`
-	Titles    map[string]any `bson:"-" json:"titles,omitempty"`
+	Titles    map[string]any `bson:"titles,omitempty" json:"titles,omitempty"`
 	MimeType  string         `bson:"-" json:"mime_type,omitempty"`
 	FileSize  int64          `bson:"-" json:"file_size,omitempty"`
 }
@@ -106,7 +106,8 @@ func (t *Track) EffectiveTitles() map[string]any {
 
 // BrowseItem represents a flattened track item optimized for list/feed UI views.
 type BrowseItem struct {
-	ID              string         `json:"_id"`
+	ID              string         `json:"id"`
+	DocID           string         `json:"_id,omitempty"`
 	SourceChatID    int64          `json:"source_chat_id,omitempty"`
 	SourceMessageID int32          `json:"source_message_id,omitempty"`
 	TopicID         int32          `json:"topic_id,omitempty"`
@@ -132,6 +133,7 @@ type BrowseItem struct {
 func (t *Track) ToBrowseItem() *BrowseItem {
 	return &BrowseItem{
 		ID:              t.ID,
+		DocID:           t.ID,
 		SourceChatID:    t.SourceChatID,
 		SourceMessageID: t.SourceMessageID,
 		TopicID:         t.TopicID,
@@ -154,28 +156,54 @@ func (t *Track) ToBrowseItem() *BrowseItem {
 	}
 }
 
-// BrowseResponse represents a paginated response of BrowseItem objects.
+// BrowseResponse represents a paginated response of BrowseItem objects matching Api/schemas/browse.py.
 type BrowseResponse struct {
 	Items      []*BrowseItem `json:"items"`
 	Total      int64         `json:"total"`
 	Page       int           `json:"page"`
 	PerPage    int           `json:"per_page"`
-	TotalPages int           `json:"total_pages"`
+	TotalPages int           `json:"total_pages,omitempty"`
+	CoverURL   string        `json:"cover_url,omitempty"`
 }
 
-// TopicItem represents an aggregated topic with track counts and cover image.
+// TopicItem represents an aggregated topic with track counts and cover image matching Api/schemas/topics.py.
 type TopicItem struct {
-	TopicID     int64  `json:"topic_id"`
-	TopicName   string `json:"topic_name"`
-	TracksCount int64  `json:"tracks_count"`
-	CoverURL    string `json:"cover_url,omitempty"`
+	Name            string   `json:"name"`
+	TopicName       string   `json:"topic_name"`
+	TopicID         *int64   `json:"topic_id,omitempty"`
+	Count           int64    `json:"count"`
+	TracksCount     int64    `json:"tracks_count"`
+	CoverURL        string   `json:"cover_url,omitempty"`
+	ThumbnailURL    string   `json:"thumbnail_url,omitempty"`
+	NormalThumbnail string   `json:"normal_thumbnail,omitempty"`
+	Thumbnails      []string `json:"thumbnails"`
+	SourceChatID    *int64   `json:"source_chat_id,omitempty"`
+	Endpoint        string   `json:"endpoint"`
 }
 
-// TopicsResponse is the response payload for GET /topics.
+// TopicsResponse is the response payload for GET /topics matching Api/schemas/topics.py.
 type TopicsResponse struct {
-	OK    bool         `json:"ok"`
-	Total int          `json:"total"`
-	Items []*TopicItem `json:"items"`
+	OK     bool         `json:"ok"`
+	Total  int          `json:"total"`
+	Items  []*TopicItem `json:"items"`
+	Topics []string     `json:"topics"`
+}
+
+// TrackResponse represents a full track document matching Api/schemas/track.py.
+type TrackResponse struct {
+	ID              string         `json:"_id"`
+	DocID           string         `json:"id,omitempty"`
+	SourceChatID    *int64         `json:"source_chat_id,omitempty"`
+	SourceMessageID *int32         `json:"source_message_id,omitempty"`
+	Telegram        map[string]any `json:"telegram,omitempty"`
+	Audio           map[string]any `json:"audio,omitempty"`
+	Spotify         map[string]any `json:"spotify,omitempty"`
+	Titles          map[string]any `json:"titles,omitempty"`
+	ContentHash     string         `json:"content_hash,omitempty"`
+	Fingerprint     string         `json:"fingerprint,omitempty"`
+	CreatedAt       float64        `json:"created_at,omitempty"`
+	UpdatedAt       float64        `json:"updated_at,omitempty"`
+	Liked           bool           `json:"liked"`
 }
 
 // ChannelItem represents an indexed Telegram source channel.

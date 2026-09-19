@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"math"
 
 	"streamgo/internal/models"
 	"streamgo/internal/repository"
@@ -22,31 +21,29 @@ func NewArtistAlbumService(repo repository.ArtistAlbumRepository, trackRepo repo
 	}
 }
 
-// ListArtists returns a paginated list of artists.
-func (s *ArtistAlbumService) ListArtists(ctx context.Context, page, perPage int) (*models.ArtistsResponse, error) {
+// ListArtists returns a paginated list of artists matching Python schema.
+func (s *ArtistAlbumService) ListArtists(ctx context.Context, page, perPage int, refresh bool) (*models.ArtistsResponse, error) {
 	if page < 1 {
 		page = 1
 	}
-	if perPage < 1 || perPage > 100 {
-		perPage = 20
+	if perPage < 1 {
+		perPage = 50
+	}
+	if perPage > 200 {
+		perPage = 200
 	}
 
-	artists, total, err := s.repo.ListArtists(ctx, page, perPage)
+	artists, total, err := s.repo.ListArtists(ctx, page, perPage, refresh)
 	if err != nil {
 		return nil, err
 	}
 
-	totalPages := 0
-	if total > 0 {
-		totalPages = int(math.Ceil(float64(total) / float64(perPage)))
-	}
-
 	return &models.ArtistsResponse{
-		Items:      artists,
-		Total:      total,
-		Page:       page,
-		PerPage:    perPage,
-		TotalPages: totalPages,
+		Ok:      true,
+		Page:    page,
+		PerPage: perPage,
+		Total:   total,
+		Items:   artists,
 	}, nil
 }
 
@@ -70,15 +67,32 @@ func (s *ArtistAlbumService) GetArtistDetail(ctx context.Context, id string) (*m
 		browseItems = append(browseItems, t.ToBrowseItem())
 	}
 
+	popularTracks := browseItems
+	if len(popularTracks) > 10 {
+		popularTracks = popularTracks[:10]
+	}
+
 	albums, err := s.repo.GetArtistAlbums(ctx, artist.Name)
 	if err != nil {
 		return nil, err
 	}
 
+	singles := make([]*models.BrowseItem, 0)
+	for _, t := range browseItems {
+		if t.Album == "" {
+			singles = append(singles, t)
+		}
+	}
+
 	return &models.ArtistDetail{
-		Artist:    artist,
-		TopTracks: browseItems,
-		Albums:    albums,
+		Ok:            true,
+		Artist:        artist,
+		PopularTracks: popularTracks,
+		TopTracks:     popularTracks,
+		Releases:      albums,
+		Albums:        albums,
+		Singles:       singles,
+		Tracks:        browseItems,
 	}, nil
 }
 
@@ -104,31 +118,51 @@ func (s *ArtistAlbumService) GetArtistTracks(ctx context.Context, id string, lim
 	return items, nil
 }
 
-// ListAlbums returns a paginated list of albums.
-func (s *ArtistAlbumService) ListAlbums(ctx context.Context, page, perPage int, artistFilter string) (*models.AlbumsResponse, error) {
+// GetArtistTracksPaginated returns paginated tracks for a specific artist ID.
+func (s *ArtistAlbumService) GetArtistTracksPaginated(ctx context.Context, id string, page, perPage int) ([]*models.BrowseItem, int64, error) {
+	artist, err := s.repo.GetArtistByID(ctx, id)
+	if err != nil {
+		return nil, 0, err
+	}
+	if artist == nil {
+		return nil, 0, nil
+	}
+
+	tracks, total, err := s.repo.GetArtistTracksPaginated(ctx, artist.Name, page, perPage)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	items := make([]*models.BrowseItem, 0, len(tracks))
+	for _, t := range tracks {
+		items = append(items, t.ToBrowseItem())
+	}
+	return items, total, nil
+}
+
+// ListAlbums returns a paginated list of albums matching Python schema.
+func (s *ArtistAlbumService) ListAlbums(ctx context.Context, page, perPage int, artistFilter string, refresh bool) (*models.AlbumsResponse, error) {
 	if page < 1 {
 		page = 1
 	}
-	if perPage < 1 || perPage > 100 {
-		perPage = 20
+	if perPage < 1 {
+		perPage = 50
+	}
+	if perPage > 200 {
+		perPage = 200
 	}
 
-	albums, total, err := s.repo.ListAlbums(ctx, page, perPage, artistFilter)
+	albums, total, err := s.repo.ListAlbums(ctx, page, perPage, artistFilter, refresh)
 	if err != nil {
 		return nil, err
 	}
 
-	totalPages := 0
-	if total > 0 {
-		totalPages = int(math.Ceil(float64(total) / float64(perPage)))
-	}
-
 	return &models.AlbumsResponse{
-		Items:      albums,
-		Total:      total,
-		Page:       page,
-		PerPage:    perPage,
-		TotalPages: totalPages,
+		Ok:      true,
+		Page:    page,
+		PerPage: perPage,
+		Total:   total,
+		Items:   albums,
 	}, nil
 }
 
@@ -153,6 +187,7 @@ func (s *ArtistAlbumService) GetAlbumDetail(ctx context.Context, id string) (*mo
 	}
 
 	return &models.AlbumDetail{
+		Ok:     true,
 		Album:  album,
 		Tracks: browseItems,
 	}, nil
@@ -170,4 +205,18 @@ func (s *ArtistAlbumService) GetAlbumTracks(ctx context.Context, id string) ([]*
 		browseItems = append(browseItems, t.ToBrowseItem())
 	}
 	return browseItems, nil
+}
+
+// GetAlbumTracksPaginated returns paginated tracks for an album.
+func (s *ArtistAlbumService) GetAlbumTracksPaginated(ctx context.Context, id string, page, perPage int) ([]*models.BrowseItem, int64, error) {
+	tracks, total, err := s.repo.GetAlbumTracksPaginated(ctx, id, page, perPage)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	browseItems := make([]*models.BrowseItem, 0, len(tracks))
+	for _, t := range tracks {
+		browseItems = append(browseItems, t.ToBrowseItem())
+	}
+	return browseItems, total, nil
 }

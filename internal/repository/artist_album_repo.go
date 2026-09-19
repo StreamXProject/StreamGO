@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -15,22 +17,61 @@ import (
 	"streamgo/internal/models"
 )
 
+var (
+	artistSplitRegex = regexp.MustCompile(`(?i)\s*(?:,|/|&|\s+and\s+|\s+x\s+|\s+feat\.\s+|\s+feat\s+|\s+ft\.\s+|\s+ft\s+)\s*`)
+)
+
+func splitArtists(value string) []string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return []string{}
+	}
+	raw = strings.ReplaceAll(raw, "(", " ")
+	raw = strings.ReplaceAll(raw, ")", " ")
+	raw = strings.ReplaceAll(raw, "[", " ")
+	raw = strings.ReplaceAll(raw, "]", " ")
+
+	parts := artistSplitRegex.Split(raw, -1)
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]bool)
+
+	for _, p := range parts {
+		token := strings.Trim(strings.TrimSpace(p), " .")
+		if token == "" {
+			continue
+		}
+		key := strings.ToLower(token)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, token)
+	}
+	return out
+}
+
 // ArtistAlbumRepository manages data access for artists and albums.
 type ArtistAlbumRepository interface {
-	ListArtists(ctx context.Context, page, perPage int) ([]*models.Artist, int64, error)
+	ListArtists(ctx context.Context, page, perPage int, refresh bool) ([]*models.Artist, int64, error)
 	GetArtistByID(ctx context.Context, id string) (*models.Artist, error)
 	GetArtistTracks(ctx context.Context, artistName string, limit int) ([]*models.Track, error)
+	GetArtistTracksPaginated(ctx context.Context, artistName string, page, perPage int) ([]*models.Track, int64, error)
 	GetArtistAlbums(ctx context.Context, artistName string) ([]*models.Album, error)
 
-	ListAlbums(ctx context.Context, page, perPage int, artistFilter string) ([]*models.Album, int64, error)
+	ListAlbums(ctx context.Context, page, perPage int, artistFilter string, refresh bool) ([]*models.Album, int64, error)
 	GetAlbumByID(ctx context.Context, id string) (*models.Album, error)
 	GetAlbumTracks(ctx context.Context, albumID string) ([]*models.Track, error)
+	GetAlbumTracksPaginated(ctx context.Context, albumID string, page, perPage int) ([]*models.Track, int64, error)
+	RefreshAlbumsCache(ctx context.Context, limit int) (int, error)
+	RefreshArtistsCache(ctx context.Context, limitTracks, limitArtists int) (int, error)
 }
 
 type mongoArtistAlbumRepository struct {
-	artistsCol *mongo.Collection
-	albumsCol  *mongo.Collection
-	tracksCol  *mongo.Collection
+	artistsCol      *mongo.Collection
+	albumsCol       *mongo.Collection
+	tracksCol       *mongo.Collection
+	albumRefreshMu  sync.Mutex
+	artistRefreshMu sync.Mutex
 }
 
 // NewArtistAlbumRepository creates an ArtistAlbumRepository backed by MongoDB.
@@ -42,15 +83,194 @@ func NewArtistAlbumRepository(db *database.Client) ArtistAlbumRepository {
 	}
 }
 
-func (r *mongoArtistAlbumRepository) ListArtists(ctx context.Context, page, perPage int) ([]*models.Artist, int64, error) {
+func (r *mongoArtistAlbumRepository) RefreshArtistsCache(ctx context.Context, limitTracks, limitArtists int) (int, error) {
+	r.artistRefreshMu.Lock()
+	defer r.artistRefreshMu.Unlock()
+
+	if limitTracks <= 0 {
+		limitTracks = 20000
+	}
+	if limitTracks > 100000 {
+		limitTracks = 100000
+	}
+	if limitArtists <= 0 {
+		limitArtists = 5000
+	}
+	if limitArtists > 20000 {
+		limitArtists = 20000
+	}
+
+	opts := options.Find().
+		SetSort(bson.D{{Key: "updated_at", Value: -1}}).
+		SetLimit(int64(limitTracks)).
+		SetProjection(bson.M{
+			"audio.artist":    1,
+			"audio.performer": 1,
+			"audio.artists":   1,
+			"spotify.artist_avatar": 1,
+			"updated_at":      1,
+		})
+
+	filter := bson.M{
+		"deleted": bson.M{"$ne": true},
+		"$or": []bson.M{
+			{"audio.artist": bson.M{"$exists": true, "$ne": ""}},
+			{"audio.performer": bson.M{"$exists": true, "$ne": ""}},
+		},
+	}
+
+	cursor, err := r.tracksCol.Find(ctx, filter, opts)
+	if err != nil {
+		return 0, err
+	}
+	defer cursor.Close(ctx)
+
+	type artistEntry struct {
+		Name        string
+		MatchArtist string
+		TracksCount int64
+		AvatarURL   string
+		UpdatedAt   float64
+	}
+
+	byKey := make(map[string]*artistEntry)
+	for cursor.Next(ctx) {
+		var doc struct {
+			Audio struct {
+				Artist    string   `bson:"artist"`
+				Performer string   `bson:"performer"`
+				Artists   []string `bson:"artists"`
+			} `bson:"audio"`
+			Spotify struct {
+				ArtistAvatar string `bson:"artist_avatar"`
+			} `bson:"spotify"`
+			UpdatedAt float64 `bson:"updated_at"`
+		}
+		if err := cursor.Decode(&doc); err != nil {
+			continue
+		}
+
+		var names []string
+		if len(doc.Audio.Artists) > 0 {
+			for _, a := range doc.Audio.Artists {
+				names = append(names, splitArtists(a)...)
+			}
+		}
+		if len(names) == 0 {
+			raw := doc.Audio.Artist
+			if raw == "" {
+				raw = doc.Audio.Performer
+			}
+			if raw != "" {
+				names = splitArtists(raw)
+			}
+		}
+
+		for _, name := range names {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			k := strings.ToLower(name)
+			if entry, exists := byKey[k]; exists {
+				entry.TracksCount++
+				if doc.UpdatedAt > entry.UpdatedAt {
+					entry.UpdatedAt = doc.UpdatedAt
+				}
+				if entry.AvatarURL == "" && doc.Spotify.ArtistAvatar != "" {
+					entry.AvatarURL = doc.Spotify.ArtistAvatar
+				}
+			} else {
+				byKey[k] = &artistEntry{
+					Name:        name,
+					MatchArtist: k,
+					TracksCount: 1,
+					AvatarURL:   doc.Spotify.ArtistAvatar,
+					UpdatedAt:   doc.UpdatedAt,
+				}
+			}
+		}
+	}
+
+	now := float64(time.Now().Unix())
+	upserted := 0
+	for _, entry := range byKey {
+		aid := "artist_" + entry.MatchArtist
+		updateDoc := bson.M{
+			"name":         entry.Name,
+			"match_artist": entry.MatchArtist,
+			"tracks_count": entry.TracksCount,
+			"updated_at":   entry.UpdatedAt,
+		}
+		if entry.AvatarURL != "" {
+			updateDoc["cover_url"] = entry.AvatarURL
+		}
+		if entry.UpdatedAt == 0 {
+			updateDoc["updated_at"] = now
+		}
+
+		opts := options.UpdateOne().SetUpsert(true)
+		_, err := r.artistsCol.UpdateOne(ctx,
+			bson.M{"_id": aid},
+			bson.M{
+				"$setOnInsert": bson.M{"created_at": now, "followers": 0},
+				"$set":         updateDoc,
+			},
+			opts,
+		)
+		if err == nil {
+			upserted++
+		}
+		if upserted >= limitArtists {
+			break
+		}
+	}
+
+	return upserted, nil
+}
+
+func (r *mongoArtistAlbumRepository) ListArtists(ctx context.Context, page, perPage int, refresh bool) ([]*models.Artist, int64, error) {
 	if page < 1 {
 		page = 1
 	}
-	if perPage < 1 || perPage > 100 {
-		perPage = 20
+	if perPage < 1 {
+		perPage = 50
+	}
+	if perPage > 200 {
+		perPage = 200
 	}
 
-	filter := bson.M{"tracks_count": bson.M{"$gt": 0}}
+	existing, _ := r.artistsCol.EstimatedDocumentCount(ctx)
+	shouldRefresh := refresh || existing <= 0
+	if !shouldRefresh {
+		var latestTrack struct {
+			UpdatedAt float64 `bson:"updated_at"`
+		}
+		var latestArtist struct {
+			UpdatedAt float64 `bson:"updated_at"`
+		}
+		trackOpts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetProjection(bson.M{"updated_at": 1})
+		_ = r.tracksCol.FindOne(ctx, bson.M{"deleted": bson.M{"$ne": true}}, trackOpts).Decode(&latestTrack)
+
+		artistOpts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetProjection(bson.M{"updated_at": 1})
+		_ = r.artistsCol.FindOne(ctx, bson.M{}, artistOpts).Decode(&latestArtist)
+
+		if latestTrack.UpdatedAt > latestArtist.UpdatedAt {
+			shouldRefresh = true
+		}
+	}
+
+	if shouldRefresh {
+		limitTracks := 20000
+		limitArtists := 5000
+		if refresh {
+			limitTracks = 100000
+			limitArtists = 20000
+		}
+		_, _ = r.RefreshArtistsCache(ctx, limitTracks, limitArtists)
+	}
+
+	filter := bson.M{}
 
 	total, err := r.artistsCol.CountDocuments(ctx, filter)
 	if err != nil {
@@ -59,7 +279,7 @@ func (r *mongoArtistAlbumRepository) ListArtists(ctx context.Context, page, perP
 
 	skip := int64((page - 1) * perPage)
 	opts := options.Find().
-		SetSort(bson.D{{Key: "tracks_count", Value: -1}, {Key: "updated_at", Value: -1}}).
+		SetSort(bson.D{{Key: "updated_at", Value: -1}}).
 		SetSkip(skip).
 		SetLimit(int64(perPage))
 
@@ -72,6 +292,18 @@ func (r *mongoArtistAlbumRepository) ListArtists(ctx context.Context, page, perP
 	var artists []*models.Artist
 	if err := cursor.All(ctx, &artists); err != nil {
 		return nil, 0, fmt.Errorf("failed to decode artists: %w", err)
+	}
+
+	for _, a := range artists {
+		if a.Id == "" {
+			a.Id = a.ID
+		}
+		if a.AvatarURL == "" {
+			a.AvatarURL = a.CoverURL
+		}
+		if a.TrackCount == 0 {
+			a.TrackCount = a.TracksCount
+		}
 	}
 
 	return artists, total, nil
@@ -88,6 +320,16 @@ func (r *mongoArtistAlbumRepository) GetArtistByID(ctx context.Context, id strin
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to fetch artist %s: %w", id, err)
+	}
+
+	if artist.Id == "" {
+		artist.Id = artist.ID
+	}
+	if artist.AvatarURL == "" {
+		artist.AvatarURL = artist.CoverURL
+	}
+	if artist.TrackCount == 0 {
+		artist.TrackCount = artist.TracksCount
 	}
 
 	return &artist, nil
@@ -127,6 +369,53 @@ func (r *mongoArtistAlbumRepository) GetArtistTracks(ctx context.Context, artist
 	return tracks, nil
 }
 
+func (r *mongoArtistAlbumRepository) GetArtistTracksPaginated(ctx context.Context, artistName string, page, perPage int) ([]*models.Track, int64, error) {
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 {
+		perPage = 50
+	}
+	if perPage > 200 {
+		perPage = 200
+	}
+
+	escaped := regexp.QuoteMeta(artistName)
+	regex := bson.M{"$regex": "^" + escaped + "$", "$options": "i"}
+
+	filter := bson.M{
+		"deleted": bson.M{"$ne": true},
+		"$or": []bson.M{
+			{"audio.artist": regex},
+			{"audio.artists": regex},
+			{"audio.performer": regex},
+		},
+	}
+
+	total, err := r.tracksCol.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	skip := int64((page - 1) * perPage)
+	opts := options.Find().
+		SetSort(bson.D{{Key: "play_count", Value: -1}, {Key: "updated_at", Value: -1}}).
+		SetSkip(skip).
+		SetLimit(int64(perPage))
+
+	cursor, err := r.tracksCol.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer cursor.Close(ctx)
+
+	var tracks []*models.Track
+	if err := cursor.All(ctx, &tracks); err != nil {
+		return nil, 0, err
+	}
+	return tracks, total, nil
+}
+
 func (r *mongoArtistAlbumRepository) GetArtistAlbums(ctx context.Context, artistName string) ([]*models.Album, error) {
 	escaped := regexp.QuoteMeta(artistName)
 	regex := bson.M{"$regex": "^" + escaped + "$", "$options": "i"}
@@ -153,15 +442,189 @@ func (r *mongoArtistAlbumRepository) GetArtistAlbums(ctx context.Context, artist
 	if err := cursor.All(ctx, &albums); err != nil {
 		return nil, err
 	}
+
+	for _, a := range albums {
+		if a.Id == "" {
+			a.Id = a.ID
+		}
+		if a.TrackCount == 0 {
+			a.TrackCount = a.TracksCount
+		}
+	}
+
 	return albums, nil
 }
 
-func (r *mongoArtistAlbumRepository) ListAlbums(ctx context.Context, page, perPage int, artistFilter string) ([]*models.Album, int64, error) {
+func (r *mongoArtistAlbumRepository) RefreshAlbumsCache(ctx context.Context, limit int) (int, error) {
+	r.albumRefreshMu.Lock()
+	defer r.albumRefreshMu.Unlock()
+
+	if limit <= 0 {
+		limit = 2000
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{
+			"deleted":        bson.M{"$ne": true},
+			"audio.album_id": bson.M{"$exists": true, "$ne": ""},
+			"$or": []bson.M{
+				{"audio.album": bson.M{"$exists": true, "$ne": ""}},
+				{"audio.title": bson.M{"$exists": true, "$ne": ""}},
+			},
+		}}},
+		{{Key: "$addFields", Value: bson.M{
+			"_aid":         "$audio.album_id",
+			"_album_title": bson.M{"$ifNull": []any{"$audio.album", "$audio.title"}},
+			"_album_artist": bson.M{
+				"$cond": []any{
+					bson.M{"$and": []any{
+						bson.M{"$isArray": "$audio.artists"},
+						bson.M{"$gt": []any{bson.M{"$size": "$audio.artists"}, 0}},
+					}},
+					bson.M{"$arrayElemAt": []any{"$audio.artists", 0}},
+					bson.M{"$ifNull": []any{"$audio.artist", "$audio.performer"}},
+				},
+			},
+			"_year": "$audio.year",
+		}}},
+		{{Key: "$addFields", Value: bson.M{
+			"_album_norm":  bson.M{"$toLower": bson.M{"$trim": bson.M{"input": "$_album_title"}}},
+			"_artist_norm": bson.M{"$toLower": bson.M{"$trim": bson.M{"input": "$_album_artist"}}},
+		}}},
+		{{Key: "$sort", Value: bson.D{{Key: "updated_at", Value: -1}}}},
+		{{Key: "$group", Value: bson.M{
+			"_id":            "$_aid",
+			"title":          bson.M{"$first": "$_album_title"},
+			"artist":         bson.M{"$first": "$_album_artist"},
+			"cover_url":      bson.M{"$first": bson.M{"$ifNull": []any{"$spotify.big_cover_url", "$spotify.cover_url"}}},
+			"year":           bson.M{"$first": "$_year"},
+			"tracks_count":   bson.M{"$sum": 1},
+			"duration_total": bson.M{"$sum": bson.M{"$ifNull": []any{"$audio.duration_sec", 0}}},
+			"updated_at":     bson.M{"$max": "$updated_at"},
+			"match_album":    bson.M{"$first": "$_album_norm"},
+			"match_artist":   bson.M{"$first": "$_artist_norm"},
+		}}},
+		{{Key: "$sort", Value: bson.D{{Key: "updated_at", Value: -1}}}},
+		{{Key: "$limit", Value: limit}},
+	}
+
+	cursor, err := r.tracksCol.Aggregate(ctx, pipeline)
+	if err != nil {
+		return 0, err
+	}
+	defer cursor.Close(ctx)
+
+	now := float64(time.Now().Unix())
+	upserted := 0
+
+	for cursor.Next(ctx) {
+		var row struct {
+			ID            string  `bson:"_id"`
+			Title         string  `bson:"title"`
+			Artist        string  `bson:"artist"`
+			CoverURL      string  `bson:"cover_url"`
+			Year          int     `bson:"year"`
+			TracksCount   int64   `bson:"tracks_count"`
+			DurationTotal float64 `bson:"duration_total"`
+			UpdatedAt     float64 `bson:"updated_at"`
+			MatchAlbum    string  `bson:"match_album"`
+			MatchArtist   string  `bson:"match_artist"`
+		}
+		if err := cursor.Decode(&row); err != nil {
+			continue
+		}
+
+		aid := strings.TrimSpace(row.ID)
+		title := strings.TrimSpace(row.Title)
+		matchAlbum := strings.TrimSpace(row.MatchAlbum)
+		if aid == "" || title == "" || matchAlbum == "" {
+			continue
+		}
+
+		artist := strings.TrimSpace(row.Artist)
+		var artists []string
+		if artist != "" {
+			artists = splitArtists(artist)
+		}
+
+		updateDoc := bson.M{
+			"title":          title,
+			"artist":         artist,
+			"cover_url":      row.CoverURL,
+			"tracks_count":   row.TracksCount,
+			"duration_total": row.DurationTotal,
+			"match_album":    matchAlbum,
+			"match_artist":   strings.TrimSpace(row.MatchArtist),
+			"updated_at":     row.UpdatedAt,
+		}
+		if len(artists) > 0 {
+			updateDoc["artists"] = artists
+		}
+		if row.Year > 0 {
+			updateDoc["year"] = row.Year
+		}
+		if row.UpdatedAt == 0 {
+			updateDoc["updated_at"] = now
+		}
+
+		opts := options.UpdateOne().SetUpsert(true)
+		_, err := r.albumsCol.UpdateOne(ctx,
+			bson.M{"_id": aid},
+			bson.M{
+				"$setOnInsert": bson.M{"created_at": now},
+				"$set":         updateDoc,
+			},
+			opts,
+		)
+		if err == nil {
+			upserted++
+		}
+	}
+
+	return upserted, nil
+}
+
+func (r *mongoArtistAlbumRepository) ListAlbums(ctx context.Context, page, perPage int, artistFilter string, refresh bool) ([]*models.Album, int64, error) {
 	if page < 1 {
 		page = 1
 	}
-	if perPage < 1 || perPage > 100 {
-		perPage = 20
+	if perPage < 1 {
+		perPage = 50
+	}
+	if perPage > 200 {
+		perPage = 200
+	}
+
+	existing, _ := r.albumsCol.EstimatedDocumentCount(ctx)
+	shouldRefresh := refresh || existing <= 0
+	if !shouldRefresh {
+		var latestTrack struct {
+			UpdatedAt float64 `bson:"updated_at"`
+		}
+		var latestAlbum struct {
+			UpdatedAt float64 `bson:"updated_at"`
+		}
+		trackOpts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetProjection(bson.M{"updated_at": 1})
+		_ = r.tracksCol.FindOne(ctx, bson.M{"deleted": bson.M{"$ne": true}, "audio.album_id": bson.M{"$exists": true, "$ne": ""}}, trackOpts).Decode(&latestTrack)
+
+		albumOpts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetProjection(bson.M{"updated_at": 1})
+		_ = r.albumsCol.FindOne(ctx, bson.M{}, albumOpts).Decode(&latestAlbum)
+
+		if latestTrack.UpdatedAt > latestAlbum.UpdatedAt {
+			shouldRefresh = true
+		}
+	}
+
+	if shouldRefresh {
+		limit := 2000
+		if refresh {
+			limit = 5000
+		}
+		_, _ = r.RefreshAlbumsCache(ctx, limit)
+		existing, _ = r.albumsCol.EstimatedDocumentCount(ctx)
 	}
 
 	filter := bson.M{}
@@ -170,9 +633,12 @@ func (r *mongoArtistAlbumRepository) ListAlbums(ctx context.Context, page, perPa
 		filter["artist"] = bson.M{"$regex": escaped, "$options": "i"}
 	}
 
-	total, err := r.albumsCol.CountDocuments(ctx, filter)
-	if err != nil {
-		return nil, 0, err
+	total := existing
+	if artistFilter != "" {
+		cnt, err := r.albumsCol.CountDocuments(ctx, filter)
+		if err == nil {
+			total = cnt
+		}
 	}
 
 	skip := int64((page - 1) * perPage)
@@ -191,6 +657,16 @@ func (r *mongoArtistAlbumRepository) ListAlbums(ctx context.Context, page, perPa
 	if err := cursor.All(ctx, &albums); err != nil {
 		return nil, 0, err
 	}
+
+	for _, a := range albums {
+		if a.Id == "" {
+			a.Id = a.ID
+		}
+		if a.TrackCount == 0 {
+			a.TrackCount = a.TracksCount
+		}
+	}
+
 	return albums, total, nil
 }
 
@@ -200,10 +676,26 @@ func (r *mongoArtistAlbumRepository) GetAlbumByID(ctx context.Context, id string
 	err := r.albumsCol.FindOne(ctx, bson.M{"_id": id}).Decode(&album)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, nil
+			_, _ = r.RefreshAlbumsCache(ctx, 5000)
+			err2 := r.albumsCol.FindOne(ctx, bson.M{"_id": id}).Decode(&album)
+			if err2 != nil {
+				if errors.Is(err2, mongo.ErrNoDocuments) {
+					return nil, nil
+				}
+				return nil, err2
+			}
+		} else {
+			return nil, err
 		}
-		return nil, err
 	}
+
+	if album.Id == "" {
+		album.Id = album.ID
+	}
+	if album.TrackCount == 0 {
+		album.TrackCount = album.TracksCount
+	}
+
 	return &album, nil
 }
 
@@ -214,8 +706,12 @@ func (r *mongoArtistAlbumRepository) GetAlbumTracks(ctx context.Context, albumID
 	}
 
 	opts := options.Find().
-		SetSort(bson.D{{Key: "updated_at", Value: 1}}).
-		SetLimit(100)
+		SetSort(bson.D{
+			{Key: "audio.track_number", Value: 1},
+			{Key: "source_message_id", Value: 1},
+			{Key: "updated_at", Value: -1},
+		}).
+		SetLimit(200)
 
 	cursor, err := r.tracksCol.Find(ctx, filter, opts)
 	if err != nil {
@@ -228,4 +724,48 @@ func (r *mongoArtistAlbumRepository) GetAlbumTracks(ctx context.Context, albumID
 		return nil, err
 	}
 	return tracks, nil
+}
+
+func (r *mongoArtistAlbumRepository) GetAlbumTracksPaginated(ctx context.Context, albumID string, page, perPage int) ([]*models.Track, int64, error) {
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 {
+		perPage = 50
+	}
+	if perPage > 200 {
+		perPage = 200
+	}
+
+	filter := bson.M{
+		"deleted":        bson.M{"$ne": true},
+		"audio.album_id": albumID,
+	}
+
+	total, err := r.tracksCol.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	skip := int64((page - 1) * perPage)
+	opts := options.Find().
+		SetSort(bson.D{
+			{Key: "audio.track_number", Value: 1},
+			{Key: "source_message_id", Value: 1},
+			{Key: "updated_at", Value: -1},
+		}).
+		SetSkip(skip).
+		SetLimit(int64(perPage))
+
+	cursor, err := r.tracksCol.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer cursor.Close(ctx)
+
+	var tracks []*models.Track
+	if err := cursor.All(ctx, &tracks); err != nil {
+		return nil, 0, err
+	}
+	return tracks, total, nil
 }

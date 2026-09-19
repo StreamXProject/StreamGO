@@ -12,7 +12,8 @@ import (
 type contextKey string
 
 const (
-	userIDKey contextKey = "userID"
+	userIDKey  contextKey = "userID"
+	isGuestKey contextKey = "isGuest"
 )
 
 // WithUserID injects a numeric user ID into context.
@@ -30,7 +31,23 @@ func GetUserID(ctx context.Context) (int64, bool) {
 	return uid, ok && uid > 0
 }
 
+// WithGuest marks context as a guest session.
+func WithGuest(ctx context.Context, isGuest bool) context.Context {
+	return context.WithValue(ctx, isGuestKey, isGuest)
+}
+
+// IsGuest checks if current request is authenticated as guest.
+func IsGuest(ctx context.Context) bool {
+	val := ctx.Value(isGuestKey)
+	if val == nil {
+		return false
+	}
+	g, ok := val.(bool)
+	return ok && g
+}
+
 func extractToken(r *http.Request) string {
+	// 1. Authorization: Bearer <token>
 	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
 	if authHeader != "" {
 		if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
@@ -39,6 +56,12 @@ func extractToken(r *http.Request) string {
 		return authHeader
 	}
 
+	// 2. X-Auth-Token header
+	if xAuth := strings.TrimSpace(r.Header.Get("X-Auth-Token")); xAuth != "" {
+		return xAuth
+	}
+
+	// 3. Query string (?token=... or ?auth=...)
 	if qToken := strings.TrimSpace(r.URL.Query().Get("token")); qToken != "" {
 		return qToken
 	}
@@ -46,42 +69,93 @@ func extractToken(r *http.Request) string {
 		return qAuth
 	}
 
+	// 4. Cookies (auth_token or token)
+	if c, err := r.Cookie("auth_token"); err == nil && strings.TrimSpace(c.Value) != "" {
+		return strings.TrimSpace(c.Value)
+	}
+	if c, err := r.Cookie("token"); err == nil && strings.TrimSpace(c.Value) != "" {
+		return strings.TrimSpace(c.Value)
+	}
+
 	return ""
 }
 
-// RequireAuth enforces a valid authentication token.
+func extractGuestPassword(r *http.Request) string {
+	if gp := strings.TrimSpace(r.Header.Get("X-Guest-Password")); gp != "" {
+		return gp
+	}
+	if gp := strings.TrimSpace(r.URL.Query().Get("guest_password")); gp != "" {
+		return gp
+	}
+	return ""
+}
+
+// RequireAuth enforces a valid authentication token or valid guest password.
 func RequireAuth(authSvc *services.AuthService) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// 1. Check direct guest password bypass
+			if guestPwd := extractGuestPassword(r); guestPwd != "" {
+				if authSvc.VerifyGuestPassword(r.Context(), guestPwd) {
+					ctx := WithGuest(r.Context(), true)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
+
+			// 2. Check token
 			token := extractToken(r)
 			if token == "" {
 				api.RespondError(w, http.StatusUnauthorized, "Authentication required")
 				return
 			}
 
-			userID, err := authSvc.VerifyToken(token)
-			if err != nil || userID <= 0 {
+			claims, err := authSvc.VerifyTokenClaims(token)
+			if err != nil {
 				api.RespondError(w, http.StatusUnauthorized, "Invalid or expired authentication token")
 				return
 			}
 
-			ctx := WithUserID(r.Context(), userID)
+			if claims.IsGuest {
+				ctx := WithGuest(r.Context(), true)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			if claims.UserID <= 0 {
+				api.RespondError(w, http.StatusUnauthorized, "Invalid user ID in token")
+				return
+			}
+
+			ctx := WithUserID(r.Context(), claims.UserID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
 
-// OptionalAuth parses authentication token if present without rejecting unauthenticated requests.
+// OptionalAuth parses authentication token or guest password without rejecting unauthenticated requests.
 func OptionalAuth(authSvc *services.AuthService) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token := extractToken(r)
-			if token != "" {
-				if userID, err := authSvc.VerifyToken(token); err == nil && userID > 0 {
-					r = r.WithContext(WithUserID(r.Context(), userID))
+			ctx := r.Context()
+			if guestPwd := extractGuestPassword(r); guestPwd != "" {
+				if authSvc.VerifyGuestPassword(ctx, guestPwd) {
+					ctx = WithGuest(ctx, true)
 				}
 			}
-			next.ServeHTTP(w, r)
+
+			token := extractToken(r)
+			if token != "" {
+				if claims, err := authSvc.VerifyTokenClaims(token); err == nil {
+					if claims.IsGuest {
+						ctx = WithGuest(ctx, true)
+					} else if claims.UserID > 0 {
+						ctx = WithUserID(ctx, claims.UserID)
+					}
+				}
+			}
+
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }

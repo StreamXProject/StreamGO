@@ -55,6 +55,13 @@ func TestMetadataFingerprint(t *testing.T) {
 	if fpClose1 != fpClose2 {
 		t.Errorf("expected %q == %q within 2-second bucket", fpClose1, fpClose2)
 	}
+
+	// Multilingual Unicode fingerprint test (RADWIMPS - 夢灯籠 from 君の名は。)
+	fpJP := MetadataFingerprint("夢灯籠", "RADWIMPS", "君の名は。", 131)
+	expectedJP := "夢灯籠|radwimps|君の名は|132"
+	if fpJP != expectedJP {
+		t.Errorf("expected %q, got %q", expectedJP, fpJP)
+	}
 }
 
 func TestAccessFilter(t *testing.T) {

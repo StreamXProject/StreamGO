@@ -34,6 +34,7 @@ type IngestionListener struct {
 	accessFilter AccessFilter
 	dedupChecker DedupChecker
 	onNewTrack   func(trackID string)
+	tgService    *Service
 }
 
 // NewIngestionListener creates a new IngestionListener.
@@ -55,6 +56,11 @@ func NewIngestionListener(
 		dedupChecker: dedup,
 		onNewTrack:   onNewTrack,
 	}
+}
+
+// SetTelegramService attaches the telegram multi-client service to the listener.
+func (l *IngestionListener) SetTelegramService(svc *Service) {
+	l.tgService = svc
 }
 
 // SetupDispatcher configures an update dispatcher to intercept audio uploads.
@@ -226,6 +232,16 @@ func (l *IngestionListener) handleMessage(ctx context.Context, msg *tg.Message) 
 	if botIDKey != "" {
 		fileIDs[botIDKey] = primaryFileID
 	}
+	if l.tgService != nil {
+		syncCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		synced := l.tgService.SyncFileIDs(syncCtx, sourceChatID, sourceMsgID, cacheChatID, cacheMsgID)
+		cancel()
+		for k, v := range synced {
+			if v != "" {
+				fileIDs[k] = v
+			}
+		}
+	}
 
 	var artists []string
 	if artist != "" {
@@ -304,14 +320,14 @@ func buildFingerprint(title, artist, album string, durSec int32) string {
 	al := normalizeListenerText(album)
 	durKey := ""
 	if durSec > 0 {
-		durKey = fmt.Sprintf("%d", (durSec/2)*2)
+		durKey = fmt.Sprintf("%d", int64(math.Round(float64(durSec)/2.0)*2))
 	}
 	return strings.Trim(strings.Join([]string{t, a, al, durKey}, "|"), "|")
 }
 
 func normalizeListenerText(val string) string {
 	s := strings.ToLower(val)
-	reNonAlpha := regexp.MustCompile(`[^a-z0-9]+`)
+	reNonAlpha := regexp.MustCompile(`[^\p{L}\p{N}]+`)
 	s = reNonAlpha.ReplaceAllString(s, " ")
 	return strings.TrimSpace(s)
 }

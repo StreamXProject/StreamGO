@@ -30,13 +30,14 @@ func (h *AlbumHandler) Routes(r chi.Router) {
 // List handles GET /albums with pagination and optional artist filter.
 func (h *AlbumHandler) List(w http.ResponseWriter, r *http.Request) {
 	page := api.ParseQueryInt(r, "page", 1)
-	perPage := api.ParseQueryInt(r, "per_page", 20)
+	perPage := api.ParseQueryInt(r, "per_page", 50)
 	if limit := api.ParseQueryInt(r, "limit", 0); limit > 0 {
 		perPage = limit
 	}
+	refresh := api.ParseQueryBool(r, "refresh", false)
 	artistFilter := strings.TrimSpace(r.URL.Query().Get("artist"))
 
-	resp, err := h.svc.ListAlbums(r.Context(), page, perPage, artistFilter)
+	resp, err := h.svc.ListAlbums(r.Context(), page, perPage, artistFilter, refresh)
 	if err != nil {
 		api.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -74,15 +75,23 @@ func (h *AlbumHandler) GetTracks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tracks, err := h.svc.GetAlbumTracks(r.Context(), id)
+	page := api.ParseQueryInt(r, "page", 1)
+	perPage := api.ParseQueryInt(r, "per_page", 50)
+	if limit := api.ParseQueryInt(r, "limit", 0); limit > 0 {
+		perPage = limit
+	}
+
+	tracks, total, err := h.svc.GetAlbumTracksPaginated(r.Context(), id, page, perPage)
 	if err != nil {
 		api.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	api.RespondJSON(w, http.StatusOK, map[string]any{
-		"ok":    true,
-		"total": len(tracks),
-		"items": tracks,
+		"ok":       true,
+		"page":     page,
+		"per_page": perPage,
+		"total":    total,
+		"items":    tracks,
 	})
 }

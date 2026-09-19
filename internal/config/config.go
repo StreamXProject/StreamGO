@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"strconv"
 	"strings"
@@ -13,22 +14,36 @@ var log = logger.New("config")
 
 // Config holds all configuration parameters for StreamGO.
 type Config struct {
-	Port          string
-	Debug         bool
-	APILogs       bool
-	CorsOrigin    string
-	MongoURI      string
-	DatabaseName  string
-	ApiID         int
-	ApiHash       string
-	BotToken      string
-	SecretKey     string
-	SessionString string
-	ChannelID         int64
-	DumpChannelID     int64
-	MultiClients      bool
-	MultiClientTokens []string
-	FilterMode        int
+	Port                     string
+	Debug                    bool
+	APILogs                  bool
+	CorsOrigin               string
+	MongoURI                 string
+	DatabaseName             string
+	ApiID                    int
+	ApiHash                  string
+	BotToken                 string
+	SecretKey                string
+	SessionString            string
+	ChannelID                int64
+	DumpChannelID            int64
+	MultiClients             bool
+	MultiClientTokens        []string
+	FilterMode               int
+	CollaboratorIDs          []int64
+	Lyrics                   bool
+	LRCLIB                   bool
+	Musixmatch               bool
+	TelegramOIDCClientID     string
+	TelegramOIDCClientSecret string
+	TelegramOIDCOrigin       string
+	TelegramOIDCRedirectURI  string
+	CookieSecure             bool
+	CookieSameSite           string
+	OwnerIDs                 []int64
+	SudoUsers                []int64
+	EnrichmentWorkers        int
+	GuestPassword            string
 }
 
 // Load reads configuration from .env file (if present) and environment variables.
@@ -65,26 +80,92 @@ func Load() *Config {
 		multiClients = true
 	}
 
+	// Parse collaborator IDs from COLLABORATOR_ID and COLLABORATOR_IDS
+	collabList := parseIDList(os.Getenv("COLLABORATOR_IDS"))
+	if singleCollab := getEnvInt64("COLLABORATOR_ID", 0); singleCollab != 0 {
+		collabList = append(collabList, singleCollab)
+	}
+
+	// Owner and Sudo users
+	ownerIDs := parseIDList(os.Getenv("OWNER_ID"))
+	if len(ownerIDs) == 0 {
+		if oid := getEnvInt64("OWNER_ID", 0); oid != 0 {
+			ownerIDs = []int64{oid}
+		}
+	}
+	sudoUsers := parseIDList(os.Getenv("SUDO_USERS"))
+
 	return &Config{
-		Port:              getEnv("PORT", "8000"),
-		Debug:             debug,
-		APILogs:           getEnvBool("API_LOGS", getEnvBool("HTTP_LOGS", false)),
-		CorsOrigin:        getEnv("CORS_ORIGIN", "*"),
-		MongoURI:          mongoURI,
-		DatabaseName:      getEnv("DATABASE_NAME", "Stream"),
-		ApiID:             getEnvInt("API_ID", 0),
-		ApiHash:           strings.TrimSpace(os.Getenv("API_HASH")),
-		BotToken:          strings.TrimSpace(os.Getenv("BOT_TOKEN")),
-		SecretKey:         strings.TrimSpace(os.Getenv("SECRET_KEY")),
-		SessionString:     strings.TrimSpace(os.Getenv("SESSION_STRING")),
-		ChannelID:         getEnvInt64("CHANNEL_ID", 0),
-		DumpChannelID:     getEnvInt64("DUMP_CHANNEL_ID", 0),
-		MultiClients:      multiClients,
-		MultiClientTokens: multiTokens,
-		FilterMode:        getEnvInt("FILTER_MODE", 0),
+		Port:                     getEnv("PORT", "8000"),
+		Debug:                    debug,
+		APILogs:                  getEnvBool("API_LOGS", getEnvBool("HTTP_LOGS", false)),
+		CorsOrigin:               getEnv("CORS_ORIGIN", "*"),
+		MongoURI:                 mongoURI,
+		DatabaseName:             getEnv("DATABASE_NAME", "Stream"),
+		ApiID:                    getEnvInt("API_ID", 0),
+		ApiHash:                  strings.TrimSpace(os.Getenv("API_HASH")),
+		BotToken:                 strings.TrimSpace(os.Getenv("BOT_TOKEN")),
+		SecretKey:                strings.TrimSpace(os.Getenv("SECRET_KEY")),
+		SessionString:            strings.TrimSpace(os.Getenv("SESSION_STRING")),
+		ChannelID:                getEnvInt64("CHANNEL_ID", 0),
+		DumpChannelID:            getEnvInt64("DUMP_CHANNEL_ID", 0),
+		MultiClients:             multiClients,
+		MultiClientTokens:        multiTokens,
+		FilterMode:               getEnvInt("FILTER_MODE", 0),
+		CollaboratorIDs:          collabList,
+		Lyrics:                   getEnvBool("LYRICS", true),
+		LRCLIB:                   getEnvBool("LRCLIB", false),
+		Musixmatch:               getEnvBool("MUSIXMATCH", true),
+		TelegramOIDCClientID:     strings.TrimSpace(os.Getenv("TELEGRAM_OIDC_CLIENT_ID")),
+		TelegramOIDCClientSecret: strings.TrimSpace(os.Getenv("TELEGRAM_OIDC_CLIENT_SECRET")),
+		TelegramOIDCOrigin:       strings.TrimSpace(os.Getenv("TELEGRAM_OIDC_ORIGIN")),
+		TelegramOIDCRedirectURI:  strings.TrimSpace(os.Getenv("TELEGRAM_OIDC_REDIRECT_URI")),
+		CookieSecure:             getEnvBool("COOKIE_SECURE", false),
+		CookieSameSite:           getEnv("COOKIE_SAMESITE", "lax"),
+		OwnerIDs:                 ownerIDs,
+		SudoUsers:                sudoUsers,
+		EnrichmentWorkers:        getEnvInt("ENRICHMENT_WORKERS", 2),
+		GuestPassword:            getEnv("GUEST_PASSWORD", ""),
 	}
 }
 
+func parseIDList(raw string) []int64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+
+	// Try JSON array first
+	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		var arr []any
+		if err := json.Unmarshal([]byte(raw), &arr); err == nil {
+			var ids []int64
+			for _, item := range arr {
+				switch v := item.(type) {
+				case float64:
+					ids = append(ids, int64(v))
+				case string:
+					if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+						ids = append(ids, n)
+					}
+				}
+			}
+			return ids
+		}
+	}
+
+	// Delimiter split (comma, space)
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == ';'
+	})
+	var ids []int64
+	for _, f := range fields {
+		if n, err := strconv.ParseInt(strings.TrimSpace(f), 10, 64); err == nil {
+			ids = append(ids, n)
+		}
+	}
+	return ids
+}
 
 func getEnv(key, defaultVal string) string {
 	if val, ok := os.LookupEnv(key); ok && strings.TrimSpace(val) != "" {

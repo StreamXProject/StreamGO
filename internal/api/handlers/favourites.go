@@ -43,16 +43,18 @@ func (h *FavouriteHandler) Routes(r chi.Router) {
 		sub.Get("/me/favourites", h.ListFavourites)
 		sub.Get("/history", h.GetHistory)
 		sub.Get("/me/history", h.GetHistory)
-		sub.Get("/top-played", h.GetHistory)
-		sub.Get("/me/top-played", h.GetHistory)
+		sub.Get("/top-played", h.GetTopPlayed)
+		sub.Get("/me/top-played", h.GetTopPlayed)
 
 		// Artist follows
 		sub.Post("/artists/favourites", h.AddArtistFavourite)
 		sub.Post("/me/artists/favourites", h.AddArtistFavourite)
 		sub.Post("/me/artists/favorite", h.AddArtistFavourite)
+		sub.Post("/me/artist/favorite", h.AddArtistFavourite)
 		sub.Delete("/artists/favourites/{id}", h.RemoveArtistFavourite)
 		sub.Delete("/me/artists/favourites/{id}", h.RemoveArtistFavourite)
 		sub.Delete("/me/artists/favorite/{id}", h.RemoveArtistFavourite)
+		sub.Delete("/me/artist/favorite/{id}", h.RemoveArtistFavourite)
 	})
 
 	r.Group(func(sub chi.Router) {
@@ -130,9 +132,12 @@ func (h *FavouriteHandler) RemoveFavourite(w http.ResponseWriter, r *http.Reques
 func (h *FavouriteHandler) ListFavouriteIDs(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r.Context())
 	if !ok {
-		api.RespondJSON(w, http.StatusOK, models.FavouriteIDsResponse{
-			OK:  true,
-			IDs: []string{},
+		api.RespondJSON(w, http.StatusOK, models.FavouriteIdsResponse{
+			Page:    1,
+			PerPage: 200,
+			Total:   0,
+			IDs:     []string{},
+			Exists:  false,
 		})
 		return
 	}
@@ -169,7 +174,7 @@ func (h *FavouriteHandler) ListFavourites(w http.ResponseWriter, r *http.Request
 	api.RespondJSON(w, http.StatusOK, resp)
 }
 
-// GetHistory handles GET /history and GET /top-played.
+// GetHistory handles GET /history and GET /me/history.
 func (h *FavouriteHandler) GetHistory(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.GetUserID(r.Context())
 	if !ok {
@@ -177,14 +182,43 @@ func (h *FavouriteHandler) GetHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := api.ParseQueryInt(r, "limit", 50)
-	resp, err := h.favSvc.GetUserHistory(r.Context(), userID, limit)
+	limit := api.ParseQueryInt(r, "limit", 100)
+	items, err := h.favSvc.GetUserHistory(r.Context(), userID, limit)
 	if err != nil {
 		api.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	api.RespondJSON(w, http.StatusOK, resp)
+	api.RespondJSON(w, http.StatusOK, &models.BrowseResponse{
+		Page:    1,
+		PerPage: limit,
+		Total:   int64(len(items)),
+		Items:   items,
+	})
+}
+
+// GetTopPlayed handles GET /top-played and GET /me/top-played.
+func (h *FavouriteHandler) GetTopPlayed(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserID(r.Context())
+	if !ok {
+		api.RespondError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	page := api.ParseQueryInt(r, "page", 1)
+	limit := api.ParseQueryInt(r, "limit", 50)
+	items, total, err := h.favSvc.GetUserTopPlayed(r.Context(), userID, page, limit)
+	if err != nil {
+		api.RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	api.RespondJSON(w, http.StatusOK, &models.BrowseResponse{
+		Page:    page,
+		PerPage: limit,
+		Total:   total,
+		Items:   items,
+	})
 }
 
 // AddArtistFavourite handles POST /artists/favourites.
@@ -267,18 +301,25 @@ func (h *FavouriteHandler) ListFavouriteArtistIDs(w http.ResponseWriter, r *http
 		return
 	}
 
-	resp, err := h.favSvc.GetFavouriteArtistIDs(r.Context(), userID)
+	ids, err := h.favSvc.GetFavouriteArtistIDs(r.Context(), userID)
 	if err != nil {
 		api.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	api.RespondJSON(w, http.StatusOK, resp)
+	api.RespondJSON(w, http.StatusOK, models.FavouriteArtistsResponse{
+		OK:  true,
+		IDs: ids,
+	})
 }
 
 // RecordListeningEvents handles POST /listening-events.
 func (h *FavouriteHandler) RecordListeningEvents(w http.ResponseWriter, r *http.Request) {
-	userID, _ := middleware.GetUserID(r.Context())
+	userID, hasUser := middleware.GetUserID(r.Context())
+	var uIDPtr *int64
+	if hasUser {
+		uIDPtr = &userID
+	}
 
 	var payload models.ListeningEventsPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -288,12 +329,7 @@ func (h *FavouriteHandler) RecordListeningEvents(w http.ResponseWriter, r *http.
 
 	count := len(payload.Events)
 	if count > 0 {
-		_ = h.favSvc.RecordListeningEvents(r.Context(), userID, payload.Events)
-		for _, ev := range payload.Events {
-			if userID > 0 && ev.TrackID != "" {
-				_ = h.favSvc.RecordHistory(r.Context(), userID, ev.TrackID, ev.PlayedAt)
-			}
-		}
+		count, _ = h.favSvc.RecordListeningEvents(r.Context(), uIDPtr, payload.Events)
 	}
 
 	api.RespondJSON(w, http.StatusOK, map[string]any{

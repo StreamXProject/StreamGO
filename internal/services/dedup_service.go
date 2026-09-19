@@ -29,10 +29,10 @@ func NewDedupService(db *database.Client) *DedupService {
 	return &DedupService{col: col}
 }
 
-// NormalizeText cleans and strips non-alphanumeric characters for fingerprinting.
+// NormalizeText cleans and strips non-alphanumeric characters for fingerprinting (supports multilingual Unicode).
 func NormalizeText(text string) string {
 	s := strings.ToLower(text)
-	reNonAlpha := regexp.MustCompile(`[^a-z0-9]+`)
+	reNonAlpha := regexp.MustCompile(`[^\p{L}\p{N}]+`)
 	s = reNonAlpha.ReplaceAllString(s, " ")
 	return strings.TrimSpace(s)
 }

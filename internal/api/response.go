@@ -53,3 +53,19 @@ func ParseQueryInt64(r *http.Request, key string, defaultVal int64) int64 {
 	}
 	return defaultVal
 }
+
+// ParseQueryBool parses a boolean query parameter with a fallback default.
+func ParseQueryBool(r *http.Request, key string, defaultVal bool) bool {
+	val := strings.TrimSpace(strings.ToLower(r.URL.Query().Get(key)))
+	if val == "" {
+		return defaultVal
+	}
+	if val == "1" || val == "true" || val == "yes" || val == "on" {
+		return true
+	}
+	if val == "0" || val == "false" || val == "no" || val == "off" {
+		return false
+	}
+	return defaultVal
+}
+

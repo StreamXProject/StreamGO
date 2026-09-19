@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -25,6 +27,7 @@ type TrackRepository interface {
 	GetTopics(ctx context.Context, limit int) ([]*models.TopicItem, error)
 	GetChannelIDs(ctx context.Context) ([]int64, error)
 	IncrementPlayCount(ctx context.Context, id string) error
+	UpdateWorkerFileID(ctx context.Context, trackID, workerID, fileID string) error
 }
 
 
@@ -240,15 +243,30 @@ func (r *mongoTrackRepository) GetTopics(ctx context.Context, limit int) ([]*mod
 	pipeline := mongo.Pipeline{
 		bson.D{{Key: "$match", Value: bson.M{
 			"deleted":    bson.M{"$ne": true},
-			"topic_name": bson.M{"$exists": true, "$nin": []interface{}{"", nil}},
+			"topic_name": bson.M{"$exists": true, "$nin": []interface{}{"", "null", "None", nil}},
+		}}},
+		bson.D{{Key: "$sort", Value: bson.D{
+			{Key: "updated_at", Value: -1},
+			{Key: "source_message_id", Value: -1},
 		}}},
 		bson.D{{Key: "$group", Value: bson.M{
-			"_id":          "$topic_name",
-			"topic_id":     bson.M{"$first": "$topic_id"},
-			"tracks_count": bson.M{"$sum": 1},
-			"cover_url":    bson.M{"$first": "$spotify.cover_url"},
+			"_id":            "$topic_name",
+			"topic_id":       bson.M{"$first": "$topic_id"},
+			"source_chat_id": bson.M{"$first": "$source_chat_id"},
+			"cover_url":      bson.M{"$first": "$spotify.cover_url"},
+			"big_cover_url":  bson.M{"$first": "$spotify.big_cover_url"},
+			"raw_thumbnails": bson.M{"$push": "$spotify.cover_url"},
+			"tracks_count":   bson.M{"$sum": 1},
 		}}},
-		bson.D{{Key: "$sort", Value: bson.M{"tracks_count": -1}}},
+		bson.D{{Key: "$project", Value: bson.M{
+			"topic_id":       1,
+			"source_chat_id": 1,
+			"cover_url":      1,
+			"big_cover_url":  1,
+			"thumbnails":     bson.M{"$slice": []interface{}{"$raw_thumbnails", 8}},
+			"tracks_count":   1,
+		}}},
+		bson.D{{Key: "$sort", Value: bson.M{"tracks_count": -1, "_id": 1}}},
 		bson.D{{Key: "$limit", Value: limit}},
 	}
 
@@ -259,10 +277,13 @@ func (r *mongoTrackRepository) GetTopics(ctx context.Context, limit int) ([]*mod
 	defer cursor.Close(ctx)
 
 	var results []struct {
-		ID          string `bson:"_id"`
-		TopicID     int64  `bson:"topic_id"`
-		TracksCount int64  `bson:"tracks_count"`
-		CoverURL    string `bson:"cover_url"`
+		ID           string   `bson:"_id"`
+		TopicID      *int64   `bson:"topic_id"`
+		SourceChatID *int64   `bson:"source_chat_id"`
+		TracksCount  int64    `bson:"tracks_count"`
+		CoverURL     string   `bson:"cover_url"`
+		BigCoverURL  string   `bson:"big_cover_url"`
+		Thumbnails   []string `bson:"thumbnails"`
 	}
 
 	if err := cursor.All(ctx, &results); err != nil {
@@ -271,11 +292,49 @@ func (r *mongoTrackRepository) GetTopics(ctx context.Context, limit int) ([]*mod
 
 	topics := make([]*models.TopicItem, 0, len(results))
 	for _, res := range results {
+		name := strings.TrimSpace(res.ID)
+		if name == "" {
+			continue
+		}
+
+		cover := strings.TrimSpace(res.BigCoverURL)
+		if cover == "" {
+			cover = strings.TrimSpace(res.CoverURL)
+		}
+
+		uniqueThumbs := make([]string, 0, 4)
+		seen := make(map[string]struct{})
+		for _, th := range res.Thumbnails {
+			th = strings.TrimSpace(th)
+			if th != "" {
+				if _, ok := seen[th]; !ok {
+					seen[th] = struct{}{}
+					uniqueThumbs = append(uniqueThumbs, th)
+					if len(uniqueThumbs) >= 4 {
+						break
+					}
+				}
+			}
+		}
+
+		if cover == "" && len(uniqueThumbs) > 0 {
+			cover = uniqueThumbs[0]
+		}
+
+		endpoint := fmt.Sprintf("/topics/%s/tracks", url.PathEscape(name))
+
 		topics = append(topics, &models.TopicItem{
-			TopicID:     res.TopicID,
-			TopicName:   res.ID,
-			TracksCount: res.TracksCount,
-			CoverURL:    res.CoverURL,
+			Name:            name,
+			TopicName:       name,
+			TopicID:         res.TopicID,
+			Count:           res.TracksCount,
+			TracksCount:     res.TracksCount,
+			CoverURL:        cover,
+			ThumbnailURL:    cover,
+			NormalThumbnail: cover,
+			Thumbnails:      uniqueThumbs,
+			SourceChatID:    res.SourceChatID,
+			Endpoint:        endpoint,
 		})
 	}
 
@@ -319,6 +378,18 @@ func (r *mongoTrackRepository) IncrementPlayCount(ctx context.Context, id string
 	filter := bson.M{"_id": id}
 	update := bson.M{
 		"$inc": bson.M{"play_count": 1},
+	}
+	_, err := r.col.UpdateOne(ctx, filter, update)
+	return err
+}
+
+func (r *mongoTrackRepository) UpdateWorkerFileID(ctx context.Context, trackID, workerID, fileID string) error {
+	filter := bson.M{"_id": trackID}
+	update := bson.M{
+		"$set": bson.M{
+			"telegram.file_ids." + workerID: fileID,
+			"updated_at":                    float64(time.Now().Unix()),
+		},
 	}
 	_, err := r.col.UpdateOne(ctx, filter, update)
 	return err

@@ -25,14 +25,12 @@ func main() {
 	fmt.Println("        StreamGO - High Performance Media API     ")
 	fmt.Println("==================================================")
 
-	// 1. Load Configuration
 	cfg := config.Load()
 	log.Infof("loaded config: PORT=%s, DB=%s, API_LOGS=%v", cfg.Port, cfg.DatabaseName, cfg.APILogs)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 2. Initialize MongoDB Connection
 	var dbClient *database.Client
 	if cfg.MongoURI != "" {
 		dbCtx, dbCancel := context.WithTimeout(ctx, 10*time.Second)
@@ -51,18 +49,20 @@ func main() {
 		}
 	}
 
-	// 3. Initialize Internal Auxiliary Services
 	coverSearch := services.NewCoverSearchService()
-	lyricsSvc := services.NewLyricsEnrichmentService()
+	lyricsSvc := services.NewLyricsEnrichmentService(cfg)
 	dedupSvc := services.NewDedupService(dbClient)
 	accessFilter := services.NewAccessFilter(cfg, dbClient)
 	enrichSvc := services.NewEnrichmentService(dbClient, coverSearch, lyricsSvc)
 
 	if dbClient != nil {
-		enrichSvc.Start(ctx, 2)
+		workers := cfg.EnrichmentWorkers
+		if workers <= 0 {
+			workers = 2
+		}
+		enrichSvc.Start(ctx, workers)
 	}
 
-	// 4. Initialize Telegram Service (Multi-Client MTProto Pool)
 	var tgService *telegram.Service
 	if cfg.ApiID > 0 && cfg.ApiHash != "" {
 		svc, err := telegram.New(cfg)
@@ -71,9 +71,8 @@ func main() {
 		} else {
 			tgService = svc
 			enrichSvc.SetDownloader(tgService)
-
-			// Attach Ingestion Listener for live channel/group audio uploads
 			listener := telegram.NewIngestionListener(cfg, dbClient, accessFilter, dedupSvc, enrichSvc.TriggerEnrich)
+			listener.SetTelegramService(tgService)
 			listener.SetupDispatcher(&tgService.Dispatcher)
 
 			log.Info("Starting Telegram MTProto multi-client pool in background...")
@@ -88,17 +87,15 @@ func main() {
 		log.Info("Telegram credentials (API_ID/API_HASH) not configured; skipping Telegram init.")
 	}
 
-	// 4. Initialize HTTP Server with Chi Router
-	srv := server.New(cfg, dbClient, tgService)
+	srv := server.New(cfg, dbClient, tgService, accessFilter)
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),
 		Handler:      srv.Router,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// 5. Start HTTP Listener in a separate goroutine
 	go func() {
 		log.Infof("HTTP server listening on http://0.0.0.0:%s", cfg.Port)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -106,7 +103,6 @@ func main() {
 		}
 	}()
 
-	// 6. Graceful Shutdown on OS Signal (SIGINT, SIGTERM)
 	signal.Ignore(syscall.SIGHUP)
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

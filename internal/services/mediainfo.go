@@ -485,7 +485,7 @@ func BuildMetadataFingerprint(title, artist, album string, durationSec int32) st
 
 func normalizeText(val string) string {
 	s := strings.ToLower(val)
-	re := regexp.MustCompile(`[^a-z0-9]+`)
+	re := regexp.MustCompile(`[^\p{L}\p{N}]+`)
 	s = re.ReplaceAllString(s, " ")
 	return strings.Join(strings.Fields(s), " ")
 }

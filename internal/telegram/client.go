@@ -5,44 +5,50 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
 
 	"streamgo/internal/config"
 	"streamgo/internal/logger"
+	"streamgo/internal/models"
 )
 
 var log = logger.New("telegram")
 
 // ClientWorker represents a single authenticated MTProto client connection.
 type ClientWorker struct {
-	ID         int64
-	FirstName  string
-	Username   string
-	Bot        bool
-	Token      string
-	Client     *telegram.Client
-	API        *tg.Client
-	Downloader *downloader.Downloader
-	Workload   int64
-	Ready      bool
+	ID                  int64
+	FirstName           string
+	Username            string
+	Bot                 bool
+	Token               string
+	Client              *telegram.Client
+	API                 *tg.Client
+	Downloader          *downloader.Downloader
+	Workload            int64
+	Ready               bool
+	channelAccessHashes map[int64]int64
+	channelAccessMu     sync.RWMutex
 }
 
-// Service encapsulates the MTProto multi-client pool and lifecycle.
+// Service manages a pool of concurrent MTProto Telegram bot clients.
 type Service struct {
-	Config         *config.Config
-	primaryWorker  *ClientWorker
-	workers        []*ClientWorker
-	mu             sync.RWMutex
-	stopCancel     context.CancelFunc
-	Dispatcher     tg.UpdateDispatcher
+	Config        *config.Config
+	Dispatcher    tg.UpdateDispatcher
+	primaryWorker *ClientWorker
+	workers       []*ClientWorker
+	mu            sync.RWMutex
+	stopCancel    context.CancelFunc
 }
 
 // New creates an unstarted Telegram multi-client pool.
@@ -59,35 +65,48 @@ func New(cfg *config.Config) (*Service, error) {
 		Dispatcher: dispatcher,
 	}
 
-	// 1. Create Primary Worker
+	sessionDir := "stream_media/sessions"
+	_ = os.MkdirAll(sessionDir, 0700)
+
+	// 1. Create Primary Worker with persistent session storage
+	primaryTokenPrefix := strings.Split(cfg.BotToken, ":")[0]
+	primarySessionPath := filepath.Join(sessionDir, fmt.Sprintf("session_%s.json", primaryTokenPrefix))
+
 	primaryClient := telegram.NewClient(cfg.ApiID, cfg.ApiHash, telegram.Options{
-		NoUpdates:     false,
-		UpdateHandler: dispatcher,
+		NoUpdates:      false,
+		UpdateHandler:  dispatcher,
+		SessionStorage: &session.FileStorage{Path: primarySessionPath},
 	})
 	svc.primaryWorker = &ClientWorker{
-		Token:      cfg.BotToken,
-		Client:     primaryClient,
-		API:        primaryClient.API(),
-		Downloader: downloader.NewDownloader(),
+		Token:               cfg.BotToken,
+		Client:              primaryClient,
+		API:                 primaryClient.API(),
+		Downloader:          downloader.NewDownloader(),
+		channelAccessHashes: make(map[int64]int64),
 	}
 	svc.workers = append(svc.workers, svc.primaryWorker)
 
 
-	// 2. Create Secondary Multi-Client Workers
+	// 2. Create Secondary Multi-Client Workers with persistent session storage
 	if cfg.MultiClients {
 		for i, tok := range cfg.MultiClientTokens {
 			tok = strings.TrimSpace(tok)
 			if tok == "" || tok == cfg.BotToken {
 				continue
 			}
+			tokenPrefix := strings.Split(tok, ":")[0]
+			sessionPath := filepath.Join(sessionDir, fmt.Sprintf("session_%s.json", tokenPrefix))
+
 			workerClient := telegram.NewClient(cfg.ApiID, cfg.ApiHash, telegram.Options{
-				NoUpdates: true, // Secondary download workers don't need update processing
+				NoUpdates:      true, // Secondary download workers don't need update processing
+				SessionStorage: &session.FileStorage{Path: sessionPath},
 			})
 			worker := &ClientWorker{
-				Token:      tok,
-				Client:     workerClient,
-				API:        workerClient.API(),
-				Downloader: downloader.NewDownloader(),
+				Token:               tok,
+				Client:              workerClient,
+				API:                 workerClient.API(),
+				Downloader:          downloader.NewDownloader(),
+				channelAccessHashes: make(map[int64]int64),
 			}
 			svc.workers = append(svc.workers, worker)
 			log.Infof("Registered multi-client worker #%d", i+1)
@@ -249,6 +268,15 @@ func (s *Service) IsReady() bool {
 	return s.primaryWorker != nil && s.primaryWorker.Ready
 }
 
+// Workers returns a snapshot slice of all registered ClientWorkers.
+func (s *Service) Workers() []*ClientWorker {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	res := make([]*ClientWorker, len(s.workers))
+	copy(res, s.workers)
+	return res
+}
+
 // Self returns primary bot user info.
 func (s *Service) Self() *tg.User {
 	s.mu.RLock()
@@ -354,3 +382,332 @@ func (s *Service) DownloadPartialByFileID(ctx context.Context, fileID string, ma
 
 	return s.DownloadPartial(ctx, location, maxBytes, w)
 }
+
+func normalizeToChannelID(chatID int64) (int64, bool) {
+	if chatID <= -1000000000000 {
+		return -chatID - 1000000000000, true
+	}
+	if chatID > 1000000000 {
+		return chatID, true
+	}
+	return chatID, false
+}
+
+func (w *ClientWorker) getChannelAccessHash(channelID int64) int64 {
+	w.channelAccessMu.RLock()
+	defer w.channelAccessMu.RUnlock()
+	if w.channelAccessHashes == nil {
+		return 0
+	}
+	return w.channelAccessHashes[channelID]
+}
+
+func (w *ClientWorker) setChannelAccessHash(channelID, accessHash int64) {
+	w.channelAccessMu.Lock()
+	defer w.channelAccessMu.Unlock()
+	if w.channelAccessHashes == nil {
+		w.channelAccessHashes = make(map[int64]int64)
+	}
+	w.channelAccessHashes[channelID] = accessHash
+}
+
+func extractMessagesList(msgs tg.MessagesMessagesClass) []tg.MessageClass {
+	if msgs == nil {
+		return nil
+	}
+	switch m := msgs.(type) {
+	case *tg.MessagesChannelMessages:
+		return m.Messages
+	case *tg.MessagesMessages:
+		return m.Messages
+	case *tg.MessagesMessagesSlice:
+		return m.Messages
+	default:
+		return nil
+	}
+}
+
+// FetchFileIDForMessage fetches a message from chatID/msgID and generates this worker's distinct file_id.
+func (w *ClientWorker) FetchFileIDForMessage(ctx context.Context, chatID int64, msgID int32) (string, error) {
+	if !w.Ready || w.API == nil {
+		return "", errors.New("worker is not ready")
+	}
+
+	channelID, isChannel := normalizeToChannelID(chatID)
+	if isChannel {
+		accessHash := w.getChannelAccessHash(channelID)
+		if accessHash == 0 {
+			// Try MessagesGetChats first (uses raw int64 channel IDs without needing prior access hash)
+			chats, err := w.API.MessagesGetChats(ctx, []int64{channelID})
+			if err == nil {
+				for _, chat := range chats.GetChats() {
+					if ch, ok := chat.(*tg.Channel); ok && ch.ID == channelID {
+						accessHash = ch.AccessHash
+						w.setChannelAccessHash(channelID, accessHash)
+						break
+					}
+				}
+			}
+			if accessHash == 0 {
+				channels, err := w.API.ChannelsGetChannels(ctx, []tg.InputChannelClass{
+					&tg.InputChannel{ChannelID: channelID},
+				})
+				if err == nil {
+					for _, chat := range channels.GetChats() {
+						if ch, ok := chat.(*tg.Channel); ok && ch.ID == channelID {
+							accessHash = ch.AccessHash
+							w.setChannelAccessHash(channelID, accessHash)
+							break
+						}
+					}
+				}
+			}
+		}
+
+		req := &tg.ChannelsGetMessagesRequest{
+			Channel: &tg.InputChannel{
+				ChannelID:  channelID,
+				AccessHash: accessHash,
+			},
+			ID: []tg.InputMessageClass{
+				&tg.InputMessageID{ID: int(msgID)},
+			},
+		}
+
+		msgs, err := w.API.ChannelsGetMessages(ctx, req)
+		if err != nil {
+			return "", fmt.Errorf("channels get messages: %w", err)
+		}
+
+		for _, m := range extractMessagesList(msgs) {
+			if msg, ok := m.(*tg.Message); ok {
+				if mediaDoc, ok := msg.Media.(*tg.MessageMediaDocument); ok {
+					if doc, ok := mediaDoc.Document.(*tg.Document); ok {
+						return EncodeFileID(doc.ID, doc.AccessHash, int32(doc.DCID), doc.FileReference), nil
+					}
+				}
+			}
+		}
+		return "", errors.New("no document found in channel message")
+	}
+
+	// Non-channel chats
+	msgs, err := w.API.MessagesGetMessages(ctx, []tg.InputMessageClass{
+		&tg.InputMessageID{ID: int(msgID)},
+	})
+	if err != nil {
+		return "", fmt.Errorf("messages get messages: %w", err)
+	}
+
+	for _, m := range extractMessagesList(msgs) {
+		if msg, ok := m.(*tg.Message); ok {
+			if mediaDoc, ok := msg.Media.(*tg.MessageMediaDocument); ok {
+				if doc, ok := mediaDoc.Document.(*tg.Document); ok {
+					return EncodeFileID(doc.ID, doc.AccessHash, int32(doc.DCID), doc.FileReference), nil
+				}
+			}
+		}
+	}
+	return "", errors.New("no document found in message")
+}
+
+// SyncFileIDs collects file_ids for all ready workers for a given message.
+func (s *Service) SyncFileIDs(ctx context.Context, chatID int64, msgID int32, fallbackChatID int64, fallbackMsgID int32) map[string]string {
+	workers := s.Workers()
+	if len(workers) == 0 {
+		return map[string]string{}
+	}
+
+	type syncResult struct {
+		botID  string
+		fileID string
+	}
+
+	results := make(chan syncResult, len(workers))
+	var wg sync.WaitGroup
+
+	for _, w := range workers {
+		if !w.Ready {
+			continue
+		}
+		worker := w
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			botID := strconv.FormatInt(worker.ID, 10)
+			if botID == "0" || botID == "" {
+				if parts := strings.Split(worker.Token, ":"); len(parts) > 0 {
+					botID = parts[0]
+				}
+			}
+			if botID == "0" || botID == "" {
+				return
+			}
+
+			// Try primary chat ID & msg ID first
+			fid, err := worker.FetchFileIDForMessage(ctx, chatID, msgID)
+			if (err != nil || fid == "") && fallbackChatID != 0 && fallbackMsgID != 0 {
+				fid, err = worker.FetchFileIDForMessage(ctx, fallbackChatID, fallbackMsgID)
+			}
+
+			if err == nil && fid != "" {
+				results <- syncResult{botID: botID, fileID: fid}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	res := make(map[string]string)
+	for r := range results {
+		res[r.botID] = r.fileID
+	}
+	return res
+}
+
+// DownloadPartialForTrack resiliently downloads a chunk of the track, matching workers and auto-refreshing expired file references.
+func (s *Service) DownloadPartialForTrack(
+	ctx context.Context,
+	track *models.Track,
+	maxBytes int64,
+	w io.Writer,
+	onRefreshed func(botID, fileID string),
+) error {
+	if track == nil {
+		return errors.New("track is nil")
+	}
+
+	readyWorkers := []*ClientWorker{}
+	s.mu.RLock()
+	for _, worker := range s.workers {
+		if worker.Ready {
+			readyWorkers = append(readyWorkers, worker)
+		}
+	}
+	s.mu.RUnlock()
+
+	if len(readyWorkers) == 0 {
+		return errors.New("no ready telegram workers available")
+	}
+
+	var chosenWorker *ClientWorker
+	var fileID string
+
+	// 1. Prefer a worker that already has a mapped file_id
+	if track.Telegram.FileIDs != nil {
+		for _, worker := range readyWorkers {
+			wid := strconv.FormatInt(worker.ID, 10)
+			if wid == "0" || wid == "" {
+				if parts := strings.Split(worker.Token, ":"); len(parts) > 0 {
+					wid = parts[0]
+				}
+			}
+			if fid, ok := track.Telegram.FileIDs[wid]; ok && fid != "" {
+				chosenWorker = worker
+				fileID = fid
+				atomic.AddInt64(&worker.Workload, 1)
+				break
+			}
+		}
+	}
+
+	// 2. If not matched, pick the least-loaded worker
+	if chosenWorker == nil {
+		chosenWorker = s.AcquireWorker()
+	}
+	defer s.ReleaseWorker(chosenWorker)
+
+	wid := strconv.FormatInt(chosenWorker.ID, 10)
+	if wid == "0" || wid == "" {
+		if parts := strings.Split(chosenWorker.Token, ":"); len(parts) > 0 {
+			wid = parts[0]
+		}
+	}
+
+	if fileID == "" && track.Telegram.FileIDs != nil {
+		fileID = track.Telegram.FileIDs[wid]
+	}
+
+	fetchFresh := func() (string, error) {
+		// Try cache channel first
+		if track.CacheChatID != 0 && track.CacheMessageID != 0 {
+			f, err := chosenWorker.FetchFileIDForMessage(ctx, track.CacheChatID, track.CacheMessageID)
+			if err == nil && f != "" {
+				return f, nil
+			}
+		}
+		// Fallback to source chat
+		if track.SourceChatID != 0 && track.SourceMessageID != 0 {
+			f, err := chosenWorker.FetchFileIDForMessage(ctx, track.SourceChatID, track.SourceMessageID)
+			if err == nil && f != "" {
+				return f, nil
+			}
+		}
+		return "", errors.New("could not resolve message to fetch fresh file_id")
+	}
+
+	if fileID == "" {
+		if fresh, err := fetchFresh(); err == nil && fresh != "" {
+			fileID = fresh
+			if onRefreshed != nil {
+				onRefreshed(wid, fileID)
+			}
+		} else {
+			fileID = track.Telegram.FileID
+		}
+	}
+
+	if fileID == "" {
+		return errors.New("no file_id available for track")
+	}
+
+	doDownload := func(fid string) error {
+		decoded, err := DecodeFileID(fid)
+		if err != nil {
+			return fmt.Errorf("failed to decode file_id: %w", err)
+		}
+		location := &tg.InputDocumentFileLocation{
+			ID:            decoded.MediaID,
+			AccessHash:    decoded.AccessHash,
+			FileReference: decoded.FileReference,
+		}
+
+		pw := &partialWriter{
+			w:      w,
+			remain: maxBytes,
+		}
+		downloader := chosenWorker.Client.Downloader()
+		_, dlErr := downloader.Download(chosenWorker.API, location).Stream(ctx, pw)
+		if dlErr != nil && !errors.Is(dlErr, io.EOF) && !errors.Is(dlErr, context.Canceled) {
+			return dlErr
+		}
+		return nil
+	}
+
+	err := doDownload(fileID)
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "FILE_REFERENCE") || strings.Contains(errStr, "400") {
+			log.Warnf("File reference expired for track %s on worker %s; refreshing from cache channel...", track.ID, wid)
+			if fresh, refreshErr := fetchFresh(); refreshErr == nil && fresh != "" {
+				fileID = fresh
+				if onRefreshed != nil {
+					onRefreshed(wid, fileID)
+				}
+				// Reset writer if seeker
+				if seeker, ok := w.(io.WriteSeeker); ok {
+					_, _ = seeker.Seek(0, io.SeekStart)
+				}
+				if trunc, ok := w.(interface{ Truncate(int64) error }); ok {
+					_ = trunc.Truncate(0)
+				}
+				err = doDownload(fileID)
+			}
+		}
+	}
+
+	return err
+}
+
+
