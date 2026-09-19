@@ -231,6 +231,10 @@ func (m *mockTrackRepo) UpdateWorkerFileID(ctx context.Context, trackID, workerI
 	return nil
 }
 
+func (m *mockTrackRepo) UpdateLyricsCache(ctx context.Context, id string, text, kind, source string, telegraphURL string) error {
+	return nil
+}
+
 func TestFavouritePlaylistService(t *testing.T) {
 	ctx := context.Background()
 	favRepo := newMockFavRepo()

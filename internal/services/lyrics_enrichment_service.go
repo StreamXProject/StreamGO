@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -55,8 +56,13 @@ func NewLyricsEnrichmentService(cfg *config.Config) *LyricsEnrichmentService {
 	}
 }
 
-// FetchLyrics searches for lyrics and romanized/localized titles.
+// FetchLyrics searches for lyrics using default provider ordering.
 func (s *LyricsEnrichmentService) FetchLyrics(ctx context.Context, title, artist, album string) (*LyricsResult, error) {
+	return s.FetchLyricsWithProvider(ctx, title, artist, album, "auto")
+}
+
+// FetchLyricsWithProvider searches for lyrics respecting user/frontend provider preference.
+func (s *LyricsEnrichmentService) FetchLyricsWithProvider(ctx context.Context, title, artist, album, provider string) (*LyricsResult, error) {
 	if s.cfg != nil && !s.cfg.Lyrics {
 		return nil, nil // Lyrics fetching disabled
 	}
@@ -69,25 +75,78 @@ func (s *LyricsEnrichmentService) FetchLyrics(ctx context.Context, title, artist
 		return nil, fmt.Errorf("title cannot be empty")
 	}
 
-	// 1. Try Musixmatch if enabled (defaults to true if config flag set)
-	if s.cfg == nil || s.cfg.Musixmatch {
+	p := strings.ToLower(strings.TrimSpace(provider))
+
+	// Helper runners
+	runMusixmatch := func() (*LyricsResult, error) {
 		res, err := s.queryMusixmatch(ctx, cleanTitle, cleanArtist, cleanAlbum)
 		if err == nil && res != nil && (res.Lyrics != "" || len(res.Titles) > 0) {
 			return res, nil
 		}
-		if err != nil {
-			logLyrics.Debugf("Musixmatch query failed for %s - %s: %v", cleanArtist, cleanTitle, err)
-		}
+		return nil, err
 	}
 
-	// 2. Try LRCLIB if enabled or as fallback
-	if s.cfg == nil || s.cfg.LRCLIB {
+	runLRCLIB := func() (*LyricsResult, error) {
 		res, err := s.queryLRCLIB(ctx, cleanTitle, cleanArtist, cleanAlbum)
-		if err == nil && res != nil {
+		if err == nil && res != nil && res.Lyrics != "" {
 			return res, nil
 		}
-		if err != nil {
-			logLyrics.Debugf("LRCLIB query failed for %s - %s: %v", cleanArtist, cleanTitle, err)
+		return nil, err
+	}
+
+	runKuGou := func() (*LyricsResult, error) {
+		res, err := s.queryKuGou(ctx, cleanTitle, cleanArtist, 0)
+		if err == nil && res != nil && res.Lyrics != "" {
+			return res, nil
+		}
+		return nil, err
+	}
+
+	switch p {
+	case "musixmatch":
+		if res, err := runMusixmatch(); err == nil {
+			return res, nil
+		}
+		if res, err := runLRCLIB(); err == nil {
+			return res, nil
+		}
+		if res, err := runKuGou(); err == nil {
+			return res, nil
+		}
+	case "lrclib":
+		if res, err := runLRCLIB(); err == nil {
+			return res, nil
+		}
+		if res, err := runMusixmatch(); err == nil {
+			return res, nil
+		}
+		if res, err := runKuGou(); err == nil {
+			return res, nil
+		}
+	case "kugou":
+		if res, err := runKuGou(); err == nil {
+			return res, nil
+		}
+		if res, err := runMusixmatch(); err == nil {
+			return res, nil
+		}
+		if res, err := runLRCLIB(); err == nil {
+			return res, nil
+		}
+	default:
+		// "auto" or unspecified: Musixmatch -> LRCLIB -> KuGou
+		if s.cfg == nil || s.cfg.Musixmatch {
+			if res, err := runMusixmatch(); err == nil {
+				return res, nil
+			}
+		}
+		if s.cfg == nil || s.cfg.LRCLIB {
+			if res, err := runLRCLIB(); err == nil {
+				return res, nil
+			}
+		}
+		if res, err := runKuGou(); err == nil {
+			return res, nil
 		}
 	}
 
@@ -417,6 +476,125 @@ func (s *LyricsEnrichmentService) queryLRCLIB(ctx context.Context, title, artist
 		Kind:         "lrc",
 		Source:       "lrclib",
 		Titles:       titles,
+	}, nil
+}
+
+func (s *LyricsEnrichmentService) queryKuGou(ctx context.Context, title, artist string, durationSec int) (*LyricsResult, error) {
+	query := fmt.Sprintf("%s - %s", strings.TrimSpace(title), strings.TrimSpace(artist))
+
+	// 1. Search song
+	searchURL := fmt.Sprintf("https://mobileservice.kugou.com/api/v3/search/song?version=9108&plat=0&pagesize=6&showtype=0&keyword=%s", url.QueryEscape(query))
+	req1, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req1.Header.Set("User-Agent", "piTube/1.0")
+
+	resp1, err := s.httpClient.Do(req1)
+	if err != nil {
+		return nil, err
+	}
+	defer resp1.Body.Close()
+
+	var searchRes struct {
+		Data struct {
+			Info []struct {
+				Hash     string  `json:"hash"`
+				Duration float64 `json:"duration"`
+			} `json:"info"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp1.Body).Decode(&searchRes); err != nil {
+		return nil, err
+	}
+
+	if len(searchRes.Data.Info) == 0 {
+		return nil, fmt.Errorf("no songs found on kugou")
+	}
+
+	targetHash := ""
+	for _, song := range searchRes.Data.Info {
+		if durationSec > 0 && math.Abs(song.Duration-float64(durationSec)) > 8 {
+			continue
+		}
+		if song.Hash != "" {
+			targetHash = song.Hash
+			break
+		}
+	}
+	if targetHash == "" {
+		targetHash = searchRes.Data.Info[0].Hash
+	}
+	if targetHash == "" {
+		return nil, fmt.Errorf("no valid hash found on kugou")
+	}
+
+	// 2. Search lyrics candidate
+	candURL := fmt.Sprintf("https://lyrics.kugou.com/search?ver=1&man=yes&client=pc&hash=%s", targetHash)
+	req2, err := http.NewRequestWithContext(ctx, http.MethodGet, candURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req2.Header.Set("User-Agent", "piTube/1.0")
+
+	resp2, err := s.httpClient.Do(req2)
+	if err != nil {
+		return nil, err
+	}
+	defer resp2.Body.Close()
+
+	var candRes struct {
+		Candidates []struct {
+			ID        string `json:"id"`
+			AccessKey string `json:"accesskey"`
+		} `json:"candidates"`
+	}
+	if err := json.NewDecoder(resp2.Body).Decode(&candRes); err != nil {
+		return nil, err
+	}
+	if len(candRes.Candidates) == 0 {
+		return nil, fmt.Errorf("no lyrics candidates on kugou")
+	}
+
+	candID := candRes.Candidates[0].ID
+	accessKey := candRes.Candidates[0].AccessKey
+
+	// 3. Download lyrics
+	downURL := fmt.Sprintf("https://lyrics.kugou.com/download?fmt=lrc&charset=utf8&client=pc&ver=1&id=%s&accesskey=%s", candID, accessKey)
+	req3, err := http.NewRequestWithContext(ctx, http.MethodGet, downURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req3.Header.Set("User-Agent", "piTube/1.0")
+
+	resp3, err := s.httpClient.Do(req3)
+	if err != nil {
+		return nil, err
+	}
+	defer resp3.Body.Close()
+
+	var downRes struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(resp3.Body).Decode(&downRes); err != nil {
+		return nil, err
+	}
+	if downRes.Content == "" {
+		return nil, fmt.Errorf("empty kugou content")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(downRes.Content)
+	if err != nil {
+		return nil, err
+	}
+
+	lrcText := string(decoded)
+	return &LyricsResult{
+		Lyrics:       lrcText,
+		SyncedLyrics: lrcText,
+		Kind:         "synced",
+		Source:       "kugou",
+		Titles:       map[string]any{"original": title},
 	}, nil
 }
 

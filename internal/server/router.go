@@ -114,6 +114,7 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service, filter *
 		histSvc := services.NewHistoryService(historyRepo, trackRepo)
 		dailySvc := services.NewDailyPlaylistService(dailyRepo, trackRepo)
 		accessSvc := services.NewAccessControlService(accessRepo)
+		lyricsSvc := services.NewLyricsEnrichmentService(cfg)
 
 		// Handlers
 		trackHandler := handlers.NewTrackHandler(trackSvc)
@@ -124,7 +125,7 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service, filter *
 		favHandler := handlers.NewFavouriteHandler(favPlaylistSvc, authSvc)
 		playlistHandler := handlers.NewPlaylistHandler(favPlaylistSvc, authSvc)
 		authHandler := handlers.NewAuthHandler(cfg, authSvc)
-		mediaExtraHandler := handlers.NewMediaExtraHandler(trackSvc)
+		mediaExtraHandler := handlers.NewMediaExtraHandler(trackSvc, lyricsSvc, trackRepo)
 		sourcesHandler := handlers.NewSourcesHandler(cfg, filter, authSvc)
 		discordHandler := handlers.NewDiscordHandler(discordSvc)
 		historyHandler := handlers.NewHistoryHandler(histSvc, authSvc)

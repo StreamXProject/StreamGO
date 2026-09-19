@@ -28,6 +28,7 @@ type TrackRepository interface {
 	GetChannelIDs(ctx context.Context) ([]int64, error)
 	IncrementPlayCount(ctx context.Context, id string) error
 	UpdateWorkerFileID(ctx context.Context, trackID, workerID, fileID string) error
+	UpdateLyricsCache(ctx context.Context, id string, text, kind, source string, telegraphURL string) error
 }
 
 
@@ -132,12 +133,66 @@ func (r *mongoTrackRepository) List(
 		return nil, 0, fmt.Errorf("failed to count tracks: %w", err)
 	}
 
-	// Default sort by updated_at descending
-	sortDoc := bson.D{{Key: "updated_at", Value: -1}}
-	if sortField == "play_count" {
-		sortDoc = bson.D{{Key: "play_count", Value: -1}, {Key: "updated_at", Value: -1}}
-	} else if sortField == "created_at" {
-		sortDoc = bson.D{{Key: "created_at", Value: -1}}
+	// Sort specification matching Python source (Api/services/track_service.py line 167)
+	var sortDoc bson.D
+	sField := strings.ToLower(strings.TrimSpace(sortField))
+	switch sField {
+	case "play_count", "plays", "popular":
+		sortDoc = bson.D{
+			{Key: "play_count", Value: -1},
+			{Key: "created_at", Value: -1},
+			{Key: "_id", Value: -1},
+		}
+	case "oldest":
+		sortDoc = bson.D{
+			{Key: "created_at", Value: 1},
+			{Key: "source_message_id", Value: 1},
+			{Key: "_id", Value: 1},
+		}
+	case "title", "title_asc", "name":
+		sortDoc = bson.D{
+			{Key: "audio.title", Value: 1},
+			{Key: "created_at", Value: -1},
+			{Key: "_id", Value: -1},
+		}
+	case "title_desc":
+		sortDoc = bson.D{
+			{Key: "audio.title", Value: -1},
+			{Key: "created_at", Value: -1},
+			{Key: "_id", Value: -1},
+		}
+	case "artist", "artist_asc":
+		sortDoc = bson.D{
+			{Key: "audio.artist", Value: 1},
+			{Key: "audio.title", Value: 1},
+			{Key: "_id", Value: -1},
+		}
+	case "updated", "updated_at":
+		sortDoc = bson.D{
+			{Key: "updated_at", Value: -1},
+			{Key: "_id", Value: -1},
+		}
+	case "recent", "recently_added", "newest", "latest", "created_at":
+		sortDoc = bson.D{
+			{Key: "created_at", Value: -1},
+			{Key: "source_message_id", Value: -1},
+			{Key: "_id", Value: -1},
+		}
+	default:
+		// Default matches Python: [("source_message_id", -1)] if channel_id is not None else [("created_at", -1), ("source_message_id", -1), ("_id", -1)]
+		if channelID != 0 {
+			sortDoc = bson.D{
+				{Key: "source_message_id", Value: -1},
+				{Key: "created_at", Value: -1},
+				{Key: "_id", Value: -1},
+			}
+		} else {
+			sortDoc = bson.D{
+				{Key: "created_at", Value: -1},
+				{Key: "source_message_id", Value: -1},
+				{Key: "_id", Value: -1},
+			}
+		}
 	}
 
 	skip := int64((page - 1) * perPage)
@@ -392,5 +447,21 @@ func (r *mongoTrackRepository) UpdateWorkerFileID(ctx context.Context, trackID, 
 		},
 	}
 	_, err := r.col.UpdateOne(ctx, filter, update)
+	return err
+}
+
+func (r *mongoTrackRepository) UpdateLyricsCache(ctx context.Context, id string, text, kind, source string, telegraphURL string) error {
+	filter := bson.M{"_id": id}
+	set := bson.M{
+		"lyrics_cache.text":       text,
+		"lyrics_cache.kind":       kind,
+		"lyrics_cache.source":     source,
+		"lyrics_cache.updated_at": float64(time.Now().Unix()),
+		"updated_at":              float64(time.Now().Unix()),
+	}
+	if telegraphURL != "" {
+		set["lyrics"] = telegraphURL
+	}
+	_, err := r.col.UpdateOne(ctx, filter, bson.M{"$set": set})
 	return err
 }
