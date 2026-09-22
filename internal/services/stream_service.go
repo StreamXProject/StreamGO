@@ -213,19 +213,54 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 		return true
 	}
 
-	// 3. If track is ALAC (or FLAC requested) and needs decoding, ensure FLAC is ready
+	// 3. If track is ALAC (or FLAC requested) and needs decoding, ensure FLAC is ready or stream WAV
 	if s.alacService != nil && s.alacService.ShouldDecodeALAC(r, track) {
-		flacPath, err := s.alacService.EnsureDecodedFLAC(ctx, track)
-		if err == nil && flacPath != "" {
-			if serveCachedFLAC(flacPath) {
-				return
-			}
-		} else if err != nil {
-			logStream.Warnf("Failed to transcode ALAC track %s to FLAC: %v; falling back to direct stream", track.ID, err)
+		// Check if local cache file already exists
+		cacheFile := filepath.Join(s.mediaDir, "alac_cache", fmt.Sprintf("%s.flac", track.ID))
+		if serveCachedFLAC(cacheFile) {
+			return
 		}
+
+		// Kick off background FLAC cache (EnsureDecodedFLAC already has internal locking)
+		go s.alacService.EnsureDecodedFLAC(context.Background(), track)
+
+		// Serve on-the-fly WAV stream with full seek support
+		wavStreamer := NewALACWAVStreamer(track, s.alacService.cfg.Port)
+		defer wavStreamer.Close()
+
+		// Increment play count asynchronously
+		go func(tid string) {
+			timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = s.repo.IncrementPlayCount(timeoutCtx, tid)
+		}(track.ID)
+
+		cleanBase := track.Audio.Title
+		if track.Audio.Artist != "" {
+			cleanBase = fmt.Sprintf("%s - %s", track.Audio.Artist, track.Audio.Title)
+		}
+		if cleanBase == "" {
+			cleanBase = track.Telegram.FileName
+		}
+		if cleanBase == "" {
+			cleanBase = track.ID
+		}
+		cleanBase = strings.TrimSuffix(cleanBase, filepath.Ext(cleanBase))
+		wavFilename := fmt.Sprintf("%s.wav", cleanBase)
+
+		fallback := strings.ReplaceAll(wavFilename, `"`, `_`)
+		encoded := url.QueryEscape(wavFilename)
+
+		w.Header().Set("Content-Type", "audio/wav")
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"; filename*=UTF-8''%s`, fallback, encoded))
+
+		// http.ServeContent handles all Range parsing and chunking automatically!
+		http.ServeContent(w, r, wavFilename, time.Now(), wavStreamer)
+		return
 	}
 
-	// Check if local cache file exists (e.g. decoded ALAC/FLAC)
+	// Double check cache (if we reached here by some other path)
 	cacheFile := filepath.Join(s.mediaDir, "alac_cache", fmt.Sprintf("%s.flac", track.ID))
 	if serveCachedFLAC(cacheFile) {
 		return
@@ -521,5 +556,3 @@ func (s *StreamService) WarmTrack(ctx context.Context, id string) {
 	}
 	logStream.Infof("Prewarming track %s (%s - %s)", track.ID, track.Audio.Artist, track.Audio.Title)
 }
-
-
