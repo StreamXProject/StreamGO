@@ -109,7 +109,7 @@ func (s *ALACWAVStreamer) startFFmpeg() error {
 
 	// Use the local HTTP endpoint to fetch the raw ALAC stream.
 	// This allows ffmpeg to seek efficiently using HTTP Range requests!
-	url := fmt.Sprintf("http://127.0.0.1:%s/tracks/%s?format=raw", s.port, s.track.ID)
+	url := fmt.Sprintf("http://127.0.0.1:%s/stream/%s?format=raw", s.port, s.track.ID)
 
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
