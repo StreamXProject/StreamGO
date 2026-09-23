@@ -75,6 +75,9 @@ func (h *StreamHandler) Download(w http.ResponseWriter, r *http.Request) {
 		if (h.streamService.ALACService() != nil && h.streamService.ALACService().ShouldDecodeALAC(r, track)) || strings.ToLower(r.URL.Query().Get("format")) == "flac" {
 			ext = "flac"
 		}
+		if ext == "alac" {
+			ext = "m4a"
+		}
 		if ext == "" {
 			ext = "mp3"
 		}

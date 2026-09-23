@@ -232,7 +232,9 @@ func normalizeAudioFormat(format string) string {
 		return "flac"
 	case strings.Contains(f, "mpeg") || strings.Contains(f, "layer 3") || f == "mp3":
 		return "mp3"
-	case strings.Contains(f, "aac") || strings.Contains(f, "alac") || strings.Contains(f, "mp4"):
+	case strings.Contains(f, "alac"):
+		return "alac"
+	case strings.Contains(f, "aac") || strings.Contains(f, "mp4"):
 		return "m4a"
 	case strings.Contains(f, "ogg") || strings.Contains(f, "vorbis") || strings.Contains(f, "opus"):
 		return "ogg"
