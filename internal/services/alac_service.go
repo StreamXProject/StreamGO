@@ -30,36 +30,8 @@ type ALACService struct {
 	maxBytes  int64
 	maxFiles  int
 
-	locks       sync.Map // trackID -> *sync.Mutex
-	wavSessions sync.Map // trackID -> time.Time (expiry)
-	pruneMu     sync.Mutex
-}
-
-// SetWAVSession marks that a track is actively being streamed as WAV.
-func (s *ALACService) SetWAVSession(trackID string, duration time.Duration) {
-	if duration <= 0 {
-		duration = 10 * time.Minute
-	}
-	s.wavSessions.Store(trackID, time.Now().Add(duration))
-}
-
-// HasActiveWAVSession checks if a track is currently in an active WAV playback session.
-func (s *ALACService) HasActiveWAVSession(trackID string) bool {
-	val, ok := s.wavSessions.Load(trackID)
-	if !ok {
-		return false
-	}
-	expiry, ok := val.(time.Time)
-	if !ok || time.Now().After(expiry) {
-		s.wavSessions.Delete(trackID)
-		return false
-	}
-	return true
-}
-
-// ClearWAVSession clears the active WAV playback session for a track.
-func (s *ALACService) ClearWAVSession(trackID string) {
-	s.wavSessions.Delete(trackID)
+	locks   sync.Map // trackID -> *sync.Mutex
+	pruneMu sync.Mutex
 }
 
 // NewALACService creates and initializes a new ALACService.
@@ -371,4 +343,3 @@ func (s *ALACService) PruneCacheIfNeeded() {
 		logALAC.Infof("[ALAC-Cache-LRU] Pruned %d stale track(s), freed %.2f MB", prunedCount, float64(prunedBytes)/(1024*1024))
 	}
 }
-

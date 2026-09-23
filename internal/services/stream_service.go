@@ -213,42 +213,14 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 		return true
 	}
 
-	// 3. If track is ALAC (or FLAC requested) and needs decoding, ensure FLAC is ready or stream WAV
+	// 3. If track is ALAC (or FLAC requested) and needs decoding, serve consistent WAV stream
 	if s.alacService != nil && s.alacService.ShouldDecodeALAC(r, track) {
 		cacheFile := filepath.Join(s.mediaDir, "alac_cache", fmt.Sprintf("%s.flac", track.ID))
-		rangeHeader := strings.TrimSpace(r.Header.Get("Range"))
-
-		isFreshPlay := rangeHeader == "" || strings.HasPrefix(rangeHeader, "bytes=0-")
-		hasWAVSession := s.alacService.HasActiveWAVSession(track.ID)
-
-		// If this is a fresh start from the beginning (not seeking in an ongoing WAV stream),
-		// clear any stale WAV session and serve the cached FLAC if ready:
-		if isFreshPlay {
-			s.alacService.ClearWAVSession(track.ID)
-			hasWAVSession = false
-		}
-
-		if !hasWAVSession {
-			if serveCachedFLAC(cacheFile) {
-				return
-			}
-		}
-
-		// Otherwise, we are either:
-		// 1) Starting a fresh playback where FLAC is not yet cached, OR
-		// 2) Continuing / seeking within an ongoing WAV playback session.
-		// Keep serving WAV to maintain consistent MIME type and byte offsets!
-
-		sessionTTL := time.Duration(track.Audio.DurationSec+120) * time.Second
-		if sessionTTL < 5*time.Minute {
-			sessionTTL = 5 * time.Minute
-		}
-		s.alacService.SetWAVSession(track.ID, sessionTTL)
 
 		// Kick off background FLAC cache if not already running
 		go s.alacService.EnsureDecodedFLAC(context.Background(), track)
 
-		// Serve on-the-fly WAV stream with full seek support
+		// Serve on-the-fly WAV stream with full seek support (reads from local cacheFile if ready, else on-the-fly)
 		wavStreamer := NewALACWAVStreamer(track, s.alacService.cfg.Port, cacheFile)
 		defer wavStreamer.Close()
 
@@ -284,10 +256,13 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 		return
 	}
 
-	// Double check cache (if we reached here by some other path)
-	cacheFile := filepath.Join(s.mediaDir, "alac_cache", fmt.Sprintf("%s.flac", track.ID))
-	if serveCachedFLAC(cacheFile) {
-		return
+	// For non-decoded tracks, do not hijack with cached FLAC if raw format was explicitly requested
+	rawParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if rawParam != "raw" && rawParam != "alac" && rawParam != "original" && rawParam != "source" {
+		cacheFile := filepath.Join(s.mediaDir, "alac_cache", fmt.Sprintf("%s.flac", track.ID))
+		if serveCachedFLAC(cacheFile) {
+			return
+		}
 	}
 
 	// 4. Handle Range Header
