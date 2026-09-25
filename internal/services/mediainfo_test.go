@@ -127,3 +127,49 @@ func TestNormalizeMimeType(t *testing.T) {
 		}
 	}
 }
+
+func TestParseMediaInfoALAC(t *testing.T) {
+	alacOutput := `General
+Format                                   : MPEG-4
+Format profile                           : Apple audio with iTunes info
+Codec ID                                 : M4A (M4A /mp42/isom)
+File size                                : 55.2 MiB
+Duration                                 : 5 min 0 s
+Overall bit rate mode                    : Variable
+Overall bit rate                         : 1 544 kb/s
+Album                                    : Hounds of Love (2018 Remaster)
+Track name                               : Running Up That Hill (A Deal With God) [2018 Remaster]
+Performer                                : Kate Bush
+Composer                                 : Kate Bush
+Genre                                    : Pop
+Recorded date                            : 1985
+
+Audio
+Format                                   : ALAC
+Format/Info                              : Apple Lossless Audio Codec
+Codec ID                                 : alac
+Codec ID/Info                            : Apple Lossless Audio Codec
+Duration                                 : 5 min 0 s
+Bit rate mode                            : Variable
+Bit rate                                 : 1 536 kb/s
+Channel(s)                               : 2 channels
+Sampling rate                            : 44.1 kHz
+Bit depth                                : 24 bits
+Stream size                              : 55.2 MiB (100%)
+`
+
+	meta := ParseMediaInfo(alacOutput, 0, 57942992)
+	if meta == nil {
+		t.Fatal("expected non-nil AudioMeta")
+	}
+	if meta.Type != "alac" {
+		t.Errorf("expected type 'alac', got '%s'", meta.Type)
+	}
+	if meta.BitDepth == nil || *meta.BitDepth != 24 {
+		t.Errorf("expected bit depth 24, got %v", meta.BitDepth)
+	}
+	if meta.Title != "Running Up That Hill (A Deal With God) [2018 Remaster]" {
+		t.Errorf("expected title 'Running Up That Hill (A Deal With God) [2018 Remaster]', got '%s'", meta.Title)
+	}
+}
+

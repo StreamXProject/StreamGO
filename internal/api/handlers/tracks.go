@@ -71,6 +71,10 @@ func (h *TrackHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if effType := track.EffectiveType(); effType != "" {
+		track.Audio.Type = effType
+	}
+
 	api.RespondJSON(w, http.StatusOK, track)
 }
 

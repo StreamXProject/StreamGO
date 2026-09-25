@@ -227,7 +227,9 @@ func (l *IngestionListener) handleMessage(ctx context.Context, msg *tg.Message) 
 	// Extract audio format
 	audioExt := "mp3"
 	lowerName := strings.ToLower(fileName)
-	if strings.HasSuffix(lowerName, ".flac") || strings.Contains(mimeType, "flac") {
+	if strings.Contains(lowerName, "alac") || strings.Contains(mimeType, "alac") {
+		audioExt = "alac"
+	} else if strings.HasSuffix(lowerName, ".flac") || strings.Contains(mimeType, "flac") {
 		audioExt = "flac"
 	} else if strings.HasSuffix(lowerName, ".mp3") || strings.Contains(mimeType, "mp3") {
 		audioExt = "mp3"

@@ -540,13 +540,20 @@ func (s *StreamService) GetTrack(ctx context.Context, id string) (*models.Track,
 	return s.repo.GetByID(ctx, id)
 }
 
-// WarmTrack pre-resolves track information and checks Telegram worker availability.
+// WarmTrack pre-resolves track information, checks Telegram worker availability, and pre-transcodes ALAC tracks.
 func (s *StreamService) WarmTrack(ctx context.Context, id string) {
 	track, err := s.repo.GetByID(ctx, id)
 	if err != nil || track == nil {
 		return
 	}
 	logStream.Infof("Prewarming track %s (%s - %s)", track.ID, track.Audio.Artist, track.Audio.Title)
+	if s.alacService != nil && s.alacService.IsALACTrack(track) {
+		go func() {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			_, _ = s.alacService.EnsureDecodedFLAC(bgCtx, track)
+		}()
+	}
 }
 
 // IsTelegramReady returns whether the Telegram streaming service has at least one connected worker.

@@ -75,7 +75,7 @@ func (s *ALACService) IsALACTrack(track *models.Track) bool {
 		return false
 	}
 
-	typeStr := strings.ToLower(strings.TrimSpace(track.Audio.Type))
+	typeStr := strings.ToLower(strings.TrimSpace(track.EffectiveType()))
 	if strings.Contains(typeStr, "alac") {
 		return true
 	}
@@ -92,6 +92,12 @@ func (s *ALACService) IsALACTrack(track *models.Track) bool {
 
 	nameStr := strings.ToLower(strings.TrimSpace(track.Telegram.FileName))
 	if strings.Contains(nameStr, "alac") {
+		return true
+	}
+
+	// Any M4A/MP4 container with bit depth is lossless ALAC
+	if (typeStr == "m4a" || strings.Contains(mimeStr, "mp4") || strings.HasSuffix(nameStr, ".m4a")) &&
+		track.Audio.BitDepth != nil && *track.Audio.BitDepth > 0 {
 		return true
 	}
 

@@ -702,8 +702,18 @@ func (s *Service) DownloadPartialForTrack(
 				remain: maxBytes,
 			}
 		}
-		downloader := chosenWorker.Client.Downloader()
-		_, dlErr := downloader.Download(chosenWorker.API, location).Stream(ctx, targetWriter)
+		dl := chosenWorker.Client.Downloader().WithPartSize(512 * 1024)
+		builder := dl.Download(chosenWorker.API, location)
+		if maxBytes <= 0 {
+			if wa, ok := w.(io.WriterAt); ok {
+				_, dlErr := builder.WithThreads(4).Parallel(ctx, wa)
+				if dlErr != nil && !errors.Is(dlErr, io.EOF) && !errors.Is(dlErr, context.Canceled) {
+					return dlErr
+				}
+				return nil
+			}
+		}
+		_, dlErr := builder.Stream(ctx, targetWriter)
 		if dlErr != nil && !errors.Is(dlErr, io.EOF) && !errors.Is(dlErr, context.Canceled) {
 			return dlErr
 		}

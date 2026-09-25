@@ -78,17 +78,21 @@ func ParseMediaInfo(output string, fallbackDurationSec int32, fileSize int64) *m
 	genre := general["genre"]
 	recordedDate := getFirst(general, "recorded date", "recorded date ")
 
-	// Format / Type normalization
-	rawFormat := strings.ToLower(getFirst(audio, "format", "general format"))
-	if rawFormat == "" {
-		rawFormat = strings.ToLower(general["format"])
-	}
-	fileType := normalizeAudioFormat(rawFormat)
-
 	bitDepth := parseBitDepth(audio["bit depth"])
 	bitrateKbps := parseBitrateKbps(getFirst(audio, "bit rate", "overall bit rate", general["overall bit rate"]))
 	samplingRateHz := parseSamplingRateHz(audio["sampling rate"])
 	year := parseYear(recordedDate)
+
+	// Format / Type normalization
+	rawFormat := strings.ToLower(getFirst(audio, "format", "codec id", "format/info", "general format"))
+	if rawFormat == "" {
+		rawFormat = strings.ToLower(getFirst(general, "format", "codec id"))
+	}
+	fileType := normalizeAudioFormat(rawFormat)
+	// If container is M4A / MP4 / AAC, but bit depth is present (lossless PCM depth 16/24/32 bits), it is ALAC
+	if (fileType == "m4a" || fileType == "" || fileType == "aac") && bitDepth != nil && *bitDepth > 0 {
+		fileType = "alac"
+	}
 
 	durationSec := parseDurationSeconds(getFirst(general, "duration", audio["duration"]))
 	if durationSec == 0 && fallbackDurationSec > 0 {
@@ -230,9 +234,13 @@ func normalizeAudioFormat(format string) string {
 	switch {
 	case strings.Contains(f, "flac"):
 		return "flac"
+	case strings.Contains(f, "alac") || strings.Contains(f, "apple lossless"):
+		return "alac"
 	case strings.Contains(f, "mpeg") || strings.Contains(f, "layer 3") || f == "mp3":
 		return "mp3"
-	case strings.Contains(f, "aac") || strings.Contains(f, "alac") || strings.Contains(f, "mp4"):
+	case strings.Contains(f, "aac"):
+		return "aac"
+	case strings.Contains(f, "mp4") || strings.Contains(f, "m4a"):
 		return "m4a"
 	case strings.Contains(f, "ogg") || strings.Contains(f, "vorbis") || strings.Contains(f, "opus"):
 		return "ogg"
