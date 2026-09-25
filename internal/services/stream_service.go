@@ -31,9 +31,10 @@ var ErrRangeNotSatisfiable = errors.New("range not satisfiable")
 
 // StreamService coordinates audio range parsing and streaming.
 type StreamService struct {
-	repo      repository.TrackRepository
-	tgService *telegram.Service
-	mediaDir  string
+	repo        repository.TrackRepository
+	tgService   *telegram.Service
+	alacService *ALACService
+	mediaDir    string
 }
 
 // NewStreamService creates a new StreamService.
@@ -47,6 +48,16 @@ func NewStreamService(repo repository.TrackRepository, tg *telegram.Service) *St
 		tgService: tg,
 		mediaDir:  mediaDir,
 	}
+}
+
+// SetALACService attaches the ALACService to StreamService.
+func (s *StreamService) SetALACService(alac *ALACService) {
+	s.alacService = alac
+}
+
+// ALACService returns the attached ALACService.
+func (s *StreamService) ALACService() *ALACService {
+	return s.alacService
 }
 
 // ByteRange defines start and end byte offsets.
@@ -156,20 +167,68 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 		filename = fmt.Sprintf("%s.mp3", track.ID)
 	}
 
+	serveCachedFLAC := func(filePath string) bool {
+		info, statErr := os.Stat(filePath)
+		if statErr != nil || info.Size() <= 10240 {
+			return false
+		}
+		f, openErr := os.Open(filePath)
+		if openErr != nil {
+			return false
+		}
+		defer f.Close()
+
+		if s.alacService != nil {
+			s.alacService.TouchFile(filePath)
+		}
+
+		cleanBase := track.Audio.Title
+		if track.Audio.Artist != "" {
+			cleanBase = fmt.Sprintf("%s - %s", track.Audio.Artist, track.Audio.Title)
+		}
+		if cleanBase == "" {
+			cleanBase = track.Telegram.FileName
+		}
+		if cleanBase == "" {
+			cleanBase = track.ID
+		}
+		cleanBase = strings.TrimSuffix(cleanBase, filepath.Ext(cleanBase))
+		flacFilename := fmt.Sprintf("%s.flac", cleanBase)
+
+		fallback := strings.ReplaceAll(flacFilename, `"`, `_`)
+		encoded := url.QueryEscape(flacFilename)
+		w.Header().Set("Content-Type", "audio/flac")
+		w.Header().Set("Accept-Ranges", "bytes")
+		if w.Header().Get("Content-Disposition") == "" {
+			w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"; filename*=UTF-8''%s`, fallback, encoded))
+		}
+
+		go func(tid string) {
+			timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = s.repo.IncrementPlayCount(timeoutCtx, tid)
+		}(track.ID)
+
+		http.ServeContent(w, r, flacFilename, info.ModTime(), f)
+		return true
+	}
+
+	// 3. If track is ALAC (or FLAC requested) and needs decoding, ensure FLAC is ready
+	if s.alacService != nil && s.alacService.ShouldDecodeALAC(r, track) {
+		flacPath, err := s.alacService.EnsureDecodedFLAC(ctx, track)
+		if err == nil && flacPath != "" {
+			if serveCachedFLAC(flacPath) {
+				return
+			}
+		} else if err != nil {
+			logStream.Warnf("Failed to transcode ALAC track %s to FLAC: %v; falling back to direct stream", track.ID, err)
+		}
+	}
+
 	// Check if local cache file exists (e.g. decoded ALAC/FLAC)
 	cacheFile := filepath.Join(s.mediaDir, "alac_cache", fmt.Sprintf("%s.flac", track.ID))
-	if info, err := os.Stat(cacheFile); err == nil && info.Size() > 10240 {
-		f, err := os.Open(cacheFile)
-		if err == nil {
-			defer f.Close()
-			if w.Header().Get("Content-Disposition") == "" {
-				fallback := strings.ReplaceAll(filename, `"`, `_`)
-				encoded := url.QueryEscape(filename)
-				w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"; filename*=UTF-8''%s`, fallback, encoded))
-			}
-			http.ServeContent(w, r, filename, info.ModTime(), f)
-			return
-		}
+	if serveCachedFLAC(cacheFile) {
+		return
 	}
 
 	// 4. Handle Range Header

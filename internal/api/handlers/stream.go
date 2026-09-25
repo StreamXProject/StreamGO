@@ -1,10 +1,10 @@
 package handlers
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -126,12 +126,15 @@ func (h *StreamHandler) Download(w http.ResponseWriter, r *http.Request) {
 			filename = fmt.Sprintf("track-%s", track.ID)
 		}
 		ext := track.Audio.Type
+		if (h.streamService.ALACService() != nil && h.streamService.ALACService().ShouldDecodeALAC(r, track)) || strings.ToLower(r.URL.Query().Get("format")) == "flac" {
+			ext = "flac"
+		}
 		if ext == "" {
 			ext = "mp3"
 		}
-		if !strings.HasSuffix(strings.ToLower(filename), "."+strings.ToLower(ext)) {
-			filename = fmt.Sprintf("%s.%s", filename, ext)
-		}
+		cleanFilename := strings.TrimSuffix(filename, filepath.Ext(filename))
+		filename = fmt.Sprintf("%s.%s", cleanFilename, ext)
+
 		fallback := strings.ReplaceAll(filename, `"`, `_`)
 		encoded := url.QueryEscape(filename)
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, fallback, encoded))

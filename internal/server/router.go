@@ -106,7 +106,9 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service, filter *
 
 		// Services
 		trackSvc := services.NewTrackService(trackRepo)
+		alacSvc := services.NewALACService(cfg, tg, "stream_media")
 		streamSvc := services.NewStreamService(trackRepo, tg)
+		streamSvc.SetALACService(alacSvc)
 		artistAlbumSvc := services.NewArtistAlbumService(artistAlbumRepo, trackRepo)
 		favPlaylistSvc := services.NewFavouritePlaylistService(favRepo, trackRepo, artistAlbumRepo)
 		authSvc := services.NewAuthService(cfg, userRepo)

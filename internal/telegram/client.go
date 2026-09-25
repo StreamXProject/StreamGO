@@ -368,18 +368,21 @@ func (pw *partialWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// DownloadPartial streams up to maxBytes of a document location into w.
+// DownloadPartial streams up to maxBytes of a document location into w (or entire document if maxBytes <= 0).
 func (s *Service) DownloadPartial(ctx context.Context, location *tg.InputDocumentFileLocation, maxBytes int64, w io.Writer) error {
 	worker := s.AcquireWorker()
 	defer s.ReleaseWorker(worker)
 
-	pw := &partialWriter{
-		w:      w,
-		remain: maxBytes,
+	var targetWriter io.Writer = w
+	if maxBytes > 0 {
+		targetWriter = &partialWriter{
+			w:      w,
+			remain: maxBytes,
+		}
 	}
 
 	downloader := worker.Client.Downloader()
-	_, err := downloader.Download(worker.API, location).Stream(ctx, pw)
+	_, err := downloader.Download(worker.API, location).Stream(ctx, targetWriter)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
 		return err
 	}
@@ -692,12 +695,15 @@ func (s *Service) DownloadPartialForTrack(
 			FileReference: decoded.FileReference,
 		}
 
-		pw := &partialWriter{
-			w:      w,
-			remain: maxBytes,
+		var targetWriter io.Writer = w
+		if maxBytes > 0 {
+			targetWriter = &partialWriter{
+				w:      w,
+				remain: maxBytes,
+			}
 		}
 		downloader := chosenWorker.Client.Downloader()
-		_, dlErr := downloader.Download(chosenWorker.API, location).Stream(ctx, pw)
+		_, dlErr := downloader.Download(chosenWorker.API, location).Stream(ctx, targetWriter)
 		if dlErr != nil && !errors.Is(dlErr, io.EOF) && !errors.Is(dlErr, context.Canceled) {
 			return dlErr
 		}
@@ -727,6 +733,11 @@ func (s *Service) DownloadPartialForTrack(
 	}
 
 	return err
+}
+
+// DownloadTrack downloads the entire track media into w without byte truncation.
+func (s *Service) DownloadTrack(ctx context.Context, track *models.Track, w io.Writer) error {
+	return s.DownloadPartialForTrack(ctx, track, 0, w, nil)
 }
 
 
