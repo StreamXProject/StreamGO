@@ -45,6 +45,8 @@ type Config struct {
 	SudoUsers                []int64
 	EnrichmentWorkers        int
 	GuestPassword            string
+	AlacCacheMaxBytes        int64
+	AlacCacheMaxFiles        int
 }
 
 // Load reads configuration from .env file (if present) and environment variables.
@@ -128,6 +130,8 @@ func Load() *Config {
 		SudoUsers:                sudoUsers,
 		EnrichmentWorkers:        getEnvInt("ENRICHMENT_WORKERS", 2),
 		GuestPassword:            getEnv("GUEST_PASSWORD", ""),
+		AlacCacheMaxBytes:        getEnvInt64("ALAC_CACHE_MAX_BYTES", 5*1024*1024*1024),
+		AlacCacheMaxFiles:        getEnvInt("ALAC_CACHE_MAX_FILES", 200),
 	}
 }
 
