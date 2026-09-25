@@ -75,7 +75,7 @@ func (s *ALACService) IsALACTrack(track *models.Track) bool {
 		return false
 	}
 
-	typeStr := strings.ToLower(strings.TrimSpace(track.Audio.Type))
+	typeStr := strings.ToLower(strings.TrimSpace(track.EffectiveType()))
 	if strings.Contains(typeStr, "alac") {
 		return true
 	}

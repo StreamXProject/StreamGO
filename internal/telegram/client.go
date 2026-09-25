@@ -66,7 +66,23 @@ func New(cfg *config.Config) (*Service, error) {
 	}
 
 	sessionDir := "stream_media/sessions"
-	_ = os.MkdirAll(sessionDir, 0700)
+	if err := os.MkdirAll(sessionDir, 0700); err != nil {
+		// Directory may be owned by root (Docker); fall back to a writable temp location
+		sessionDir = filepath.Join(os.TempDir(), "streamgo_sessions")
+		_ = os.MkdirAll(sessionDir, 0700)
+		log.Warnf("Default session directory not writable, using fallback: %s", sessionDir)
+	} else {
+		// Verify the directory is actually writable by trying to create a temp file
+		testFile := filepath.Join(sessionDir, ".write_test")
+		if f, err := os.Create(testFile); err != nil {
+			sessionDir = filepath.Join(os.TempDir(), "streamgo_sessions")
+			_ = os.MkdirAll(sessionDir, 0700)
+			log.Warnf("Session directory exists but not writable, using fallback: %s", sessionDir)
+		} else {
+			f.Close()
+			os.Remove(testFile)
+		}
+	}
 
 	// 1. Create Primary Worker with persistent session storage
 	primaryTokenPrefix := strings.Split(cfg.BotToken, ":")[0]
@@ -127,7 +143,7 @@ func (s *Service) Start(ctx context.Context) error {
 	for _, w := range s.workers {
 		worker := w
 		go func() {
-			_ = worker.Client.Run(ctx, func(ctx context.Context) error {
+			err := worker.Client.Run(ctx, func(ctx context.Context) error {
 				// Authenticate
 				authStatus, err := worker.Client.Auth().Status(ctx)
 				if err != nil {
@@ -165,6 +181,9 @@ func (s *Service) Start(ctx context.Context) error {
 				<-ctx.Done()
 				return ctx.Err()
 			})
+			if err != nil && ctx.Err() == nil {
+				log.Errorf("Telegram worker (token prefix: %s) failed: %v", worker.Token[:min(10, len(worker.Token))], err)
+			}
 		}()
 	}
 
@@ -683,8 +702,18 @@ func (s *Service) DownloadPartialForTrack(
 				remain: maxBytes,
 			}
 		}
-		downloader := chosenWorker.Client.Downloader()
-		_, dlErr := downloader.Download(chosenWorker.API, location).Stream(ctx, targetWriter)
+		dl := chosenWorker.Client.Downloader().WithPartSize(512 * 1024)
+		builder := dl.Download(chosenWorker.API, location)
+		if maxBytes <= 0 {
+			if wa, ok := w.(io.WriterAt); ok {
+				_, dlErr := builder.WithThreads(4).Parallel(ctx, wa)
+				if dlErr != nil && !errors.Is(dlErr, io.EOF) && !errors.Is(dlErr, context.Canceled) {
+					return dlErr
+				}
+				return nil
+			}
+		}
+		_, dlErr := builder.Stream(ctx, targetWriter)
 		if dlErr != nil && !errors.Is(dlErr, io.EOF) && !errors.Is(dlErr, context.Canceled) {
 			return dlErr
 		}

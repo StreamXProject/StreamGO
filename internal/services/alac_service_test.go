@@ -62,6 +62,17 @@ func TestIsALACTrack(t *testing.T) {
 			expected: false,
 		},
 		{
+			name: "M4A with 24-bit bit depth",
+			track: &models.Track{
+				Audio: models.AudioMeta{
+					Type:     "m4a",
+					BitDepth: func(v int32) *int32 { return &v }(24),
+				},
+				Telegram: models.TelegramMeta{FileName: "song.m4a", MimeType: "audio/mp4"},
+			},
+			expected: true,
+		},
+		{
 			name: "Standard FLAC",
 			track: &models.Track{
 				Audio:    models.AudioMeta{Type: "flac"},

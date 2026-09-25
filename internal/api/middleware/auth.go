@@ -46,7 +46,8 @@ func IsGuest(ctx context.Context) bool {
 	return ok && g
 }
 
-func extractToken(r *http.Request) string {
+// ExtractToken extracts auth token from headers, query string, or cookies.
+func ExtractToken(r *http.Request) string {
 	// 1. Authorization: Bearer <token>
 	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
 	if authHeader != "" {
@@ -104,7 +105,7 @@ func RequireAuth(authSvc *services.AuthService) func(next http.Handler) http.Han
 			}
 
 			// 2. Check token
-			token := extractToken(r)
+			token := ExtractToken(r)
 			if token == "" {
 				api.RespondError(w, http.StatusUnauthorized, "Authentication required")
 				return
@@ -144,7 +145,7 @@ func OptionalAuth(authSvc *services.AuthService) func(next http.Handler) http.Ha
 				}
 			}
 
-			token := extractToken(r)
+			token := ExtractToken(r)
 			if token != "" {
 				if claims, err := authSvc.VerifyTokenClaims(token); err == nil {
 					if claims.IsGuest {

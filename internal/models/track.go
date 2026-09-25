@@ -1,5 +1,7 @@
 package models
 
+import "strings"
+
 // AudioMeta represents metadata extracted from the audio stream or tags via MediaInfo.
 type AudioMeta struct {
 	Title          string   `bson:"title,omitempty" json:"title"`
@@ -104,6 +106,22 @@ func (t *Track) EffectiveTitles() map[string]any {
 	return nil
 }
 
+// EffectiveType returns the audio format type, automatically distinguishing ALAC from lossy M4A if bit depth is present.
+func (t *Track) EffectiveType() string {
+	typ := strings.ToLower(strings.TrimSpace(t.Audio.Type))
+	if (typ == "m4a" || typ == "" || typ == "aac") && t.Audio.BitDepth != nil && *t.Audio.BitDepth > 0 {
+		return "alac"
+	}
+	if typ != "" {
+		return typ
+	}
+	name := strings.ToLower(t.Telegram.FileName)
+	if strings.Contains(name, "alac") || strings.Contains(strings.ToLower(t.Telegram.MimeType), "alac") {
+		return "alac"
+	}
+	return typ
+}
+
 // BrowseItem represents a flattened track item optimized for list/feed UI views.
 type BrowseItem struct {
 	ID              string         `json:"id"`
@@ -143,7 +161,7 @@ func (t *Track) ToBrowseItem() *BrowseItem {
 		Album:           t.Audio.Album,
 		AlbumID:         t.Audio.AlbumID,
 		DurationSec:     t.Audio.DurationSec,
-		Type:            t.Audio.Type,
+		Type:            t.EffectiveType(),
 		SamplingRateHz:  t.Audio.SamplingRateHz,
 		BitDepth:        t.Audio.BitDepth,
 		BitrateKbps:     t.Audio.BitrateKbps,

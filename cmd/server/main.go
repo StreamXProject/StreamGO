@@ -16,6 +16,8 @@ import (
 	"streamgo/internal/server"
 	"streamgo/internal/services"
 	"streamgo/internal/telegram"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 var log = logger.New("main")
@@ -61,6 +63,22 @@ func main() {
 			workers = 2
 		}
 		enrichSvc.Start(ctx, workers)
+
+		// Fix any existing tracks where audio format was saved as "m4a" but has lossless bit depth (ALAC)
+		go func() {
+			migCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			col := dbClient.Database.Collection("audioTracks")
+			res, err := col.UpdateMany(migCtx, bson.M{
+				"audio.type":      "m4a",
+				"audio.bit_depth": bson.M{"$gt": 0},
+			}, bson.M{
+				"$set": bson.M{"audio.type": "alac"},
+			})
+			if err == nil && res.ModifiedCount > 0 {
+				log.Infof("[migration] Normalized %d lossless ALAC track(s) from 'm4a' to 'alac'", res.ModifiedCount)
+			}
+		}()
 	}
 
 	var tgService *telegram.Service
@@ -109,6 +127,7 @@ func main() {
 	sig := <-quit
 
 	log.Infof("received shutdown signal (%s), starting graceful shutdown...", sig)
+	cancel() // Concurrently signals background workers (enrichment, telegram) to abort
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
@@ -119,5 +138,6 @@ func main() {
 		log.Info("HTTP server shutdown cleanly.")
 	}
 
+	enrichSvc.Stop()
 	log.Info("StreamGO stopped. Goodbye!")
 }
