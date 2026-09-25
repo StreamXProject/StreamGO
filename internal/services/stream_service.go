@@ -186,7 +186,40 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 		// If err != nil (malformed syntax), RFC 7233 says ignore Range and serve full content (byteRange == nil)
 	}
 
-	// 5. Setup Response Headers
+	// 5. Check Telegram client connectivity BEFORE writing any response headers.
+	// If headers (200/206 + Content-Length) are committed and then no bytes follow,
+	// the browser's <audio> element fires MEDIA_ERR_SRC_NOT_SUPPORTED.
+	if s.tgService == nil {
+		http.Error(w, "Telegram streaming service is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.tgService.IsReady() {
+		// Wait briefly for a connecting client (e.g. startup race)
+		deadline := time.After(8 * time.Second)
+		ticker := time.NewTicker(250 * time.Millisecond)
+		waitDone := false
+		for !waitDone {
+			select {
+			case <-deadline:
+				waitDone = true
+			case <-ctx.Done():
+				ticker.Stop()
+				return
+			case <-ticker.C:
+				if s.tgService.IsReady() {
+					waitDone = true
+				}
+			}
+		}
+		ticker.Stop()
+		if !s.tgService.IsReady() {
+			logStream.Warnf("Telegram client not ready for track %s; returning 503", trackID)
+			http.Error(w, "Telegram streaming service is not ready", http.StatusServiceUnavailable)
+			return
+		}
+	}
+
+	// 6. Setup Response Headers
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Type", mimeType)
 	if w.Header().Get("Content-Disposition") == "" {
@@ -211,7 +244,7 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 		return
 	}
 
-	// 6. Asynchronously increment play count
+	// 7. Asynchronously increment play count
 	go func(tid string) {
 		timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -219,12 +252,6 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 	}(track.ID)
 
 	w.WriteHeader(status)
-
-	// Check Telegram client connectivity
-	if s.tgService == nil || !s.tgService.IsReady() {
-		logStream.Warnf("Telegram client not ready for track %s", trackID)
-		return
-	}
 
 	// Stream chunks directly from Telegram to HTTP Response
 	s.streamFromTelegram(ctx, w, track, byteRange, totalSize)
@@ -463,4 +490,7 @@ func (s *StreamService) WarmTrack(ctx context.Context, id string) {
 	logStream.Infof("Prewarming track %s (%s - %s)", track.ID, track.Audio.Artist, track.Audio.Title)
 }
 
-
+// IsTelegramReady returns whether the Telegram streaming service has at least one connected worker.
+func (s *StreamService) IsTelegramReady() bool {
+	return s.tgService != nil && s.tgService.IsReady()
+}

@@ -118,12 +118,19 @@ func (r *mongoHistoryRepository) GetUserHistory(ctx context.Context, userID int6
 
 	filter := bson.M{"$or": []bson.M{
 		{"user_id": userID},
+		{"user_id": int32(userID)},
+		{"user_id": float64(userID)},
 		{"user_id": fmt.Sprintf("%d", userID)},
 	}}
 
+	scanLimit := int64(limit * 5)
+	if scanLimit < 250 {
+		scanLimit = 250
+	}
+
 	opts := options.Find().
 		SetSort(bson.D{{Key: "played_at", Value: -1}}).
-		SetLimit(int64(limit * 3))
+		SetLimit(scanLimit)
 
 	cursor, err := r.histCol.Find(ctx, filter, opts)
 	if err != nil {
@@ -135,13 +142,15 @@ func (r *mongoHistoryRepository) GetUserHistory(ctx context.Context, userID int6
 	seen := make(map[string]bool)
 
 	for cursor.Next(ctx) {
-		var doc struct {
-			TrackID string `bson:"track_id"`
-		}
-		if err := cursor.Decode(&doc); err == nil && doc.TrackID != "" {
-			if !seen[doc.TrackID] {
-				seen[doc.TrackID] = true
-				orderedIDs = append(orderedIDs, doc.TrackID)
+		var raw bson.M
+		if err := cursor.Decode(&raw); err == nil {
+			var tid string
+			if v, ok := raw["track_id"]; ok && v != nil {
+				tid = strings.TrimSpace(fmt.Sprint(v))
+			}
+			if tid != "" && !seen[tid] {
+				seen[tid] = true
+				orderedIDs = append(orderedIDs, tid)
 				if len(orderedIDs) >= limit {
 					break
 				}
@@ -161,8 +170,15 @@ func (r *mongoHistoryRepository) GetUserTopPlayed(ctx context.Context, userID in
 		limit = 100
 	}
 
+	matchFilter := bson.M{"$or": []bson.M{
+		{"user_id": userID},
+		{"user_id": int32(userID)},
+		{"user_id": float64(userID)},
+		{"user_id": fmt.Sprintf("%d", userID)},
+	}}
+
 	pipeline := mongo.Pipeline{
-		{{Key: "$match", Value: bson.M{"user_id": userID}}},
+		{{Key: "$match", Value: matchFilter}},
 		{{Key: "$group", Value: bson.M{
 			"_id":   "$track_id",
 			"plays": bson.M{"$sum": "$plays"},
@@ -179,11 +195,15 @@ func (r *mongoHistoryRepository) GetUserTopPlayed(ctx context.Context, userID in
 
 	var trackIDs []string
 	for cursor.Next(ctx) {
-		var doc struct {
-			TrackID string `bson:"_id"`
-		}
-		if err := cursor.Decode(&doc); err == nil && doc.TrackID != "" {
-			trackIDs = append(trackIDs, doc.TrackID)
+		var raw bson.M
+		if err := cursor.Decode(&raw); err == nil {
+			var tid string
+			if v, ok := raw["_id"]; ok && v != nil {
+				tid = strings.TrimSpace(fmt.Sprint(v))
+			}
+			if tid != "" {
+				trackIDs = append(trackIDs, tid)
+			}
 		}
 	}
 

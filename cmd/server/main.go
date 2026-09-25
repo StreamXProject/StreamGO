@@ -109,6 +109,7 @@ func main() {
 	sig := <-quit
 
 	log.Infof("received shutdown signal (%s), starting graceful shutdown...", sig)
+	cancel() // Concurrently signals background workers (enrichment, telegram) to abort
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
@@ -119,5 +120,6 @@ func main() {
 		log.Info("HTTP server shutdown cleanly.")
 	}
 
+	enrichSvc.Stop()
 	log.Info("StreamGO stopped. Goodbye!")
 }

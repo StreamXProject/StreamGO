@@ -102,6 +102,7 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service, filter *
 		historyRepo := repository.NewHistoryRepository(db)
 		dailyRepo := repository.NewDailyPlaylistRepository(db)
 		accessRepo := repository.NewAccessControlRepository(db)
+		recapRepo := repository.NewRecapRepository(db)
 
 		// Services
 		trackSvc := services.NewTrackService(trackRepo)
@@ -115,11 +116,12 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service, filter *
 		dailySvc := services.NewDailyPlaylistService(dailyRepo, trackRepo)
 		accessSvc := services.NewAccessControlService(accessRepo)
 		lyricsSvc := services.NewLyricsEnrichmentService(cfg)
+		recapSvc := services.NewRecapService(recapRepo, trackRepo)
 
 		// Handlers
 		trackHandler := handlers.NewTrackHandler(trackSvc)
 		topicHandler := handlers.NewTopicHandler(trackSvc)
-		streamHandler := handlers.NewStreamHandler(streamSvc)
+		streamHandler := handlers.NewStreamHandler(streamSvc, authSvc, histSvc)
 		artistHandler := handlers.NewArtistHandler(artistAlbumSvc)
 		albumHandler := handlers.NewAlbumHandler(artistAlbumSvc)
 		favHandler := handlers.NewFavouriteHandler(favPlaylistSvc, authSvc)
@@ -132,6 +134,7 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service, filter *
 		dailyHandler := handlers.NewDailyPlaylistHandler(dailySvc, authSvc)
 		accessHandler := handlers.NewAccessControlHandler(accessSvc, authSvc, cfg)
 		shareHandler := handlers.NewShareHandler(trackRepo, favRepo, cfg)
+		recapHandler := handlers.NewRecapHandler(recapSvc, authSvc)
 
 		// Register routes
 		trackHandler.Routes(r)
@@ -149,6 +152,7 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service, filter *
 		dailyHandler.Routes(r)
 		accessHandler.Routes(r)
 		shareHandler.Routes(r)
+		recapHandler.Routes(r)
 	}
 
 	// SPA & Static Asset Catch-All Handler

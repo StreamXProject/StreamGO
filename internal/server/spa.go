@@ -91,6 +91,7 @@ func isAPIOrReservedPath(path string) bool {
 		"/daily-playlist",
 		"/admin",
 		"/share",
+		"/recaps",
 		"/sources",
 		"/discord",
 		"/health",

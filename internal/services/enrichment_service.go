@@ -424,3 +424,8 @@ func (s *EnrichmentService) enrichSingleTrack(ctx context.Context, trackID strin
 
 	logEnrich.Infof("Enriched track %s (%s - %s)", trackID, artist, title)
 }
+
+// Stop gracefully waits for in-flight enrichment workers to exit upon context cancellation.
+func (s *EnrichmentService) Stop() {
+	s.wg.Wait()
+}

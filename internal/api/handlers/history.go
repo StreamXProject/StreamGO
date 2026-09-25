@@ -26,19 +26,14 @@ func NewHistoryHandler(histSvc *services.HistoryService, authSvc *services.AuthS
 	}
 }
 
-// Routes mounts history and playback telemetry endpoints.
+// Routes mounts history endpoints.
 func (h *HistoryHandler) Routes(r chi.Router) {
-	optionalAuth := middleware.OptionalAuth(h.authSvc)
 	requireAuth := middleware.RequireAuth(h.authSvc)
 
 	// History endpoints
 	r.With(requireAuth).Get("/history", h.GetHistory)
 	r.With(requireAuth).Get("/me/history", h.GetHistory)
 	r.With(requireAuth).Get("/me/top-played", h.GetTopPlayed)
-
-	// Telemetry / listening events
-	r.With(optionalAuth).Post("/me/listening-events", h.RecordEvents)
-	r.With(optionalAuth).Post("/listening-events", h.RecordEvents)
 }
 
 // GetHistory handles GET /history and GET /me/history.
