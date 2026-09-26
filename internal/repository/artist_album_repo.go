@@ -50,6 +50,15 @@ func splitArtists(value string) []string {
 	return out
 }
 
+var nonAlphaNumRe = regexp.MustCompile(`[^\p{L}\p{N}]+`)
+
+func slugify(val string) string {
+	s := strings.ToLower(val)
+	s = nonAlphaNumRe.ReplaceAllString(s, " ")
+	s = strings.TrimSpace(s)
+	return strings.ReplaceAll(s, " ", "_")
+}
+
 // ArtistAlbumRepository manages data access for artists and albums.
 type ArtistAlbumRepository interface {
 	ListArtists(ctx context.Context, page, perPage int, refresh bool) ([]*models.Artist, int64, error)
@@ -84,7 +93,9 @@ func NewArtistAlbumRepository(db *database.Client) ArtistAlbumRepository {
 }
 
 func (r *mongoArtistAlbumRepository) RefreshArtistsCache(ctx context.Context, limitTracks, limitArtists int) (int, error) {
-	r.artistRefreshMu.Lock()
+	if !r.artistRefreshMu.TryLock() {
+		return 0, nil
+	}
 	defer r.artistRefreshMu.Unlock()
 
 	if limitTracks <= 0 {
@@ -104,11 +115,11 @@ func (r *mongoArtistAlbumRepository) RefreshArtistsCache(ctx context.Context, li
 		SetSort(bson.D{{Key: "updated_at", Value: -1}}).
 		SetLimit(int64(limitTracks)).
 		SetProjection(bson.M{
-			"audio.artist":    1,
-			"audio.performer": 1,
-			"audio.artists":   1,
+			"audio.artist":          1,
+			"audio.performer":       1,
+			"audio.artists":         1,
 			"spotify.artist_avatar": 1,
-			"updated_at":      1,
+			"updated_at":            1,
 		})
 
 	filter := bson.M{
@@ -194,8 +205,14 @@ func (r *mongoArtistAlbumRepository) RefreshArtistsCache(ctx context.Context, li
 
 	now := float64(time.Now().Unix())
 	upserted := 0
+	var writeModels []mongo.WriteModel
+
 	for _, entry := range byKey {
-		aid := "artist_" + entry.MatchArtist
+		slug := slugify(entry.Name)
+		if slug == "" {
+			continue
+		}
+		aid := "artist_" + slug
 		updateDoc := bson.M{
 			"name":         entry.Name,
 			"match_artist": entry.MatchArtist,
@@ -209,21 +226,28 @@ func (r *mongoArtistAlbumRepository) RefreshArtistsCache(ctx context.Context, li
 			updateDoc["updated_at"] = now
 		}
 
-		opts := options.UpdateOne().SetUpsert(true)
-		_, err := r.artistsCol.UpdateOne(ctx,
-			bson.M{"_id": aid},
-			bson.M{
+		model := mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"_id": aid}).
+			SetUpdate(bson.M{
 				"$setOnInsert": bson.M{"created_at": now, "followers": 0},
 				"$set":         updateDoc,
-			},
-			opts,
-		)
-		if err == nil {
-			upserted++
+			}).
+			SetUpsert(true)
+
+		writeModels = append(writeModels, model)
+		if len(writeModels) >= 500 {
+			_, _ = r.artistsCol.BulkWrite(ctx, writeModels, options.BulkWrite().SetOrdered(false))
+			upserted += len(writeModels)
+			writeModels = writeModels[:0]
 		}
 		if upserted >= limitArtists {
 			break
 		}
+	}
+
+	if len(writeModels) > 0 {
+		_, _ = r.artistsCol.BulkWrite(ctx, writeModels, options.BulkWrite().SetOrdered(false))
+		upserted += len(writeModels)
 	}
 
 	return upserted, nil
@@ -240,46 +264,27 @@ func (r *mongoArtistAlbumRepository) ListArtists(ctx context.Context, page, perP
 		perPage = 200
 	}
 
-	existing, _ := r.artistsCol.EstimatedDocumentCount(ctx)
-	shouldRefresh := refresh || existing <= 0
-	if !shouldRefresh {
-		var latestTrack struct {
-			UpdatedAt float64 `bson:"updated_at"`
-		}
-		var latestArtist struct {
-			UpdatedAt float64 `bson:"updated_at"`
-		}
-		trackOpts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetProjection(bson.M{"updated_at": 1})
-		_ = r.tracksCol.FindOne(ctx, bson.M{"deleted": bson.M{"$ne": true}}, trackOpts).Decode(&latestTrack)
-
-		artistOpts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetProjection(bson.M{"updated_at": 1})
-		_ = r.artistsCol.FindOne(ctx, bson.M{}, artistOpts).Decode(&latestArtist)
-
-		if latestTrack.UpdatedAt > latestArtist.UpdatedAt {
-			shouldRefresh = true
-		}
+	total, err := r.artistsCol.EstimatedDocumentCount(ctx)
+	if err != nil {
+		total, _ = r.artistsCol.CountDocuments(ctx, bson.M{})
 	}
 
-	if shouldRefresh {
-		limitTracks := 20000
-		limitArtists := 5000
-		if refresh {
-			limitTracks = 100000
-			limitArtists = 20000
-		}
-		_, _ = r.RefreshArtistsCache(ctx, limitTracks, limitArtists)
+	// Trigger asynchronous background cache refresh if completely empty or explicitly asked
+	if refresh || total <= 0 {
+		go func() {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			_, _ = r.RefreshArtistsCache(bgCtx, 100000, 20000)
+		}()
 	}
 
 	filter := bson.M{}
-
-	total, err := r.artistsCol.CountDocuments(ctx, filter)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to count artists: %w", err)
-	}
-
 	skip := int64((page - 1) * perPage)
 	opts := options.Find().
-		SetSort(bson.D{{Key: "updated_at", Value: -1}}).
+		SetSort(bson.D{
+			{Key: "tracks_count", Value: -1},
+			{Key: "updated_at", Value: -1},
+		}).
 		SetSkip(skip).
 		SetLimit(int64(perPage))
 
@@ -519,6 +524,7 @@ func (r *mongoArtistAlbumRepository) RefreshAlbumsCache(ctx context.Context, lim
 
 	now := float64(time.Now().Unix())
 	upserted := 0
+	var writeModels []mongo.WriteModel
 
 	for cursor.Next(ctx) {
 		var row struct {
@@ -570,18 +576,25 @@ func (r *mongoArtistAlbumRepository) RefreshAlbumsCache(ctx context.Context, lim
 			updateDoc["updated_at"] = now
 		}
 
-		opts := options.UpdateOne().SetUpsert(true)
-		_, err := r.albumsCol.UpdateOne(ctx,
-			bson.M{"_id": aid},
-			bson.M{
+		model := mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"_id": aid}).
+			SetUpdate(bson.M{
 				"$setOnInsert": bson.M{"created_at": now},
 				"$set":         updateDoc,
-			},
-			opts,
-		)
-		if err == nil {
-			upserted++
+			}).
+			SetUpsert(true)
+
+		writeModels = append(writeModels, model)
+		if len(writeModels) >= 500 {
+			_, _ = r.albumsCol.BulkWrite(ctx, writeModels, options.BulkWrite().SetOrdered(false))
+			upserted += len(writeModels)
+			writeModels = writeModels[:0]
 		}
+	}
+
+	if len(writeModels) > 0 {
+		_, _ = r.albumsCol.BulkWrite(ctx, writeModels, options.BulkWrite().SetOrdered(false))
+		upserted += len(writeModels)
 	}
 
 	return upserted, nil
@@ -598,47 +611,32 @@ func (r *mongoArtistAlbumRepository) ListAlbums(ctx context.Context, page, perPa
 		perPage = 200
 	}
 
-	existing, _ := r.albumsCol.EstimatedDocumentCount(ctx)
-	shouldRefresh := refresh || existing <= 0
-	if !shouldRefresh {
-		var latestTrack struct {
-			UpdatedAt float64 `bson:"updated_at"`
-		}
-		var latestAlbum struct {
-			UpdatedAt float64 `bson:"updated_at"`
-		}
-		trackOpts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetProjection(bson.M{"updated_at": 1})
-		_ = r.tracksCol.FindOne(ctx, bson.M{"deleted": bson.M{"$ne": true}, "audio.album_id": bson.M{"$exists": true, "$ne": ""}}, trackOpts).Decode(&latestTrack)
-
-		albumOpts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}}).SetProjection(bson.M{"updated_at": 1})
-		_ = r.albumsCol.FindOne(ctx, bson.M{}, albumOpts).Decode(&latestAlbum)
-
-		if latestTrack.UpdatedAt > latestAlbum.UpdatedAt {
-			shouldRefresh = true
-		}
-	}
-
-	if shouldRefresh {
-		limit := 2000
-		if refresh {
-			limit = 5000
-		}
-		_, _ = r.RefreshAlbumsCache(ctx, limit)
-		existing, _ = r.albumsCol.EstimatedDocumentCount(ctx)
-	}
-
 	filter := bson.M{}
 	if artistFilter != "" {
 		escaped := regexp.QuoteMeta(artistFilter)
-		filter["artist"] = bson.M{"$regex": escaped, "$options": "i"}
+		filter["$or"] = []bson.M{
+			{"artist": bson.M{"$regex": escaped, "$options": "i"}},
+			{"artists": bson.M{"$regex": escaped, "$options": "i"}},
+			{"match_artist": strings.ToLower(artistFilter)},
+		}
 	}
 
-	total := existing
-	if artistFilter != "" {
-		cnt, err := r.albumsCol.CountDocuments(ctx, filter)
-		if err == nil {
-			total = cnt
-		}
+	var total int64
+	var err error
+	if len(filter) == 0 {
+		total, err = r.albumsCol.EstimatedDocumentCount(ctx)
+	}
+	if total <= 0 || len(filter) > 0 {
+		total, err = r.albumsCol.CountDocuments(ctx, filter)
+	}
+
+	// Trigger asynchronous background cache refresh if completely empty or explicitly asked
+	if (refresh || total <= 0) && artistFilter == "" {
+		go func() {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			_, _ = r.RefreshAlbumsCache(bgCtx, 5000)
+		}()
 	}
 
 	skip := int64((page - 1) * perPage)
@@ -676,17 +674,23 @@ func (r *mongoArtistAlbumRepository) GetAlbumByID(ctx context.Context, id string
 	err := r.albumsCol.FindOne(ctx, bson.M{"_id": id}).Decode(&album)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			_, _ = r.RefreshAlbumsCache(ctx, 5000)
-			err2 := r.albumsCol.FindOne(ctx, bson.M{"_id": id}).Decode(&album)
-			if err2 != nil {
-				if errors.Is(err2, mongo.ErrNoDocuments) {
-					return nil, nil
+			// Find track from this album to synthesize album doc instantly without full aggregation
+			var t models.Track
+			tErr := r.tracksCol.FindOne(ctx, bson.M{"audio.album_id": id, "deleted": bson.M{"$ne": true}}).Decode(&t)
+			if tErr == nil && t.Audio.Album != "" {
+				album = models.Album{
+					ID:         id,
+					Title:      t.Audio.Album,
+					Artist:     t.Audio.Artist,
+					Artists:    t.Audio.Artists,
+					CoverURL:   t.EffectiveCoverURL(),
+					MatchAlbum: strings.ToLower(t.Audio.Album),
 				}
-				return nil, err2
+				return &album, nil
 			}
-		} else {
-			return nil, err
+			return nil, nil
 		}
+		return nil, err
 	}
 
 	if album.Id == "" {

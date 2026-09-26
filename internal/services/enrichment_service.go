@@ -401,9 +401,11 @@ func (s *EnrichmentService) enrichSingleTrack(ctx context.Context, trackID strin
 		return
 	}
 
-	// 10. Update artist entity
+	// 10. Update artist entity incrementally
 	if artist != "" && s.artistsCol != nil {
-		artistID := "artist_" + strings.ToLower(NormalizeText(artist))
+		slug := strings.ToLower(NormalizeText(artist))
+		slug = strings.ReplaceAll(slug, " ", "_")
+		artistID := "artist_" + slug
 		artistCover, _ := s.coverSearch.FindArtistAvatar(ctx, artist)
 		artistUpdate := bson.M{
 			"$setOnInsert": bson.M{
@@ -411,15 +413,53 @@ func (s *EnrichmentService) enrichSingleTrack(ctx context.Context, trackID strin
 				"name":         artist,
 				"match_artist": strings.ToLower(artist),
 				"created_at":   nowTs,
+				"followers":    0,
 			},
 			"$set": bson.M{
 				"updated_at": nowTs,
+			},
+			"$inc": bson.M{
+				"tracks_count": 1,
 			},
 		}
 		if artistCover != "" {
 			artistUpdate["$set"].(bson.M)["cover_url"] = artistCover
 		}
 		_, _ = s.artistsCol.UpdateOne(ctx, bson.M{"_id": artistID}, artistUpdate, options.UpdateOne().SetUpsert(true))
+	}
+
+	// 11. Update album entity incrementally
+	if album != "" && s.albumsCol != nil {
+		albumID := GenerateAlbumID(album, year)
+		bestCover := track.EffectiveCoverURL()
+		if c, ok := updateFields["spotify.cover_url"].(string); ok && c != "" {
+			bestCover = c
+		}
+		albumUpdate := bson.M{
+			"$setOnInsert": bson.M{
+				"_id":          albumID,
+				"title":        album,
+				"artist":       artist,
+				"artists":      []string{artist},
+				"match_album":  strings.ToLower(album),
+				"match_artist": strings.ToLower(artist),
+				"created_at":   nowTs,
+			},
+			"$set": bson.M{
+				"updated_at": nowTs,
+			},
+			"$inc": bson.M{
+				"tracks_count":   1,
+				"duration_total": durationSec,
+			},
+		}
+		if year != nil {
+			albumUpdate["$set"].(bson.M)["year"] = *year
+		}
+		if bestCover != "" {
+			albumUpdate["$set"].(bson.M)["cover_url"] = bestCover
+		}
+		_, _ = s.albumsCol.UpdateOne(ctx, bson.M{"_id": albumID}, albumUpdate, options.UpdateOne().SetUpsert(true))
 	}
 
 	logEnrich.Infof("Enriched track %s (%s - %s)", trackID, artist, title)
