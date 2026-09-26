@@ -663,6 +663,7 @@ func sanitizeFLACHeader(data []byte) {
 			break
 		}
 	}
+}
 // IsTelegramReady returns whether the Telegram streaming service has at least one connected worker.
 func (s *StreamService) IsTelegramReady() bool {
 	return s.tgService != nil && s.tgService.IsReady()
