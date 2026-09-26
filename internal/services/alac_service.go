@@ -95,10 +95,31 @@ func (s *ALACService) IsALACTrack(track *models.Track) bool {
 		return true
 	}
 
-	// Any M4A/MP4 container with bit depth is lossless ALAC
-	if (typeStr == "m4a" || strings.Contains(mimeStr, "mp4") || strings.HasSuffix(nameStr, ".m4a")) &&
-		track.Audio.BitDepth != nil && *track.Audio.BitDepth > 0 {
-		return true
+	// Check if already transcoded into the FLAC cache
+	if s.cacheDir != "" {
+		cacheFile := filepath.Join(s.cacheDir, fmt.Sprintf("%s.flac", track.ID))
+		if info, err := os.Stat(cacheFile); err == nil && info.Size() > 10240 {
+			return true
+		}
+	}
+
+	// M4A/MP4 container analysis:
+	// Lossy AAC never has a bit depth in MediaInfo; ALAC is PCM-based lossless with explicit bit depth (16 or 24-bit).
+	// In addition, standard 2-channel stereo AAC bitrates max out at 320 kbps, whereas lossless ALAC is typically 500-1400+ kbps.
+	isM4A := typeStr == "m4a" || typeStr == "mp4" || mimeStr == "audio/mp4" || mimeStr == "audio/x-m4a" || strings.HasSuffix(nameStr, ".m4a")
+	if isM4A {
+		if track.Audio.BitDepth != nil && *track.Audio.BitDepth > 0 {
+			return true
+		}
+		if track.Audio.BitrateKbps != nil && *track.Audio.BitrateKbps > 450 {
+			return true
+		}
+		if track.Audio.DurationSec > 0 && track.Telegram.FileSize > 0 {
+			calcKbps := (track.Telegram.FileSize * 8) / (int64(track.Audio.DurationSec) * 1000)
+			if calcKbps > 450 {
+				return true
+			}
+		}
 	}
 
 	return false
@@ -349,4 +370,3 @@ func (s *ALACService) PruneCacheIfNeeded() {
 		logALAC.Infof("[ALAC-Cache-LRU] Pruned %d stale track(s), freed %.2f MB", prunedCount, float64(prunedBytes)/(1024*1024))
 	}
 }
-

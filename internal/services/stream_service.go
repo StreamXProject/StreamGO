@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/http"
@@ -152,20 +153,61 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 		totalSize = 10 * 1024 * 1024
 	}
 
-	// 2. Determine mime type
+	// 2. Determine mime type and normalize vendor mime types
+	audioType := strings.ToLower(strings.TrimSpace(track.Audio.Type))
 	mimeType := track.Audio.MimeType
 	if mimeType == "" {
 		mimeType = track.Telegram.MimeType
+	}
+	switch {
+	case audioType == "flac" || mimeType == "audio/x-flac" || mimeType == "audio/flac":
+		mimeType = "audio/flac"
+	case audioType == "wav" || mimeType == "audio/x-wav" || mimeType == "audio/wav":
+		mimeType = "audio/wav"
+	case audioType == "mp3" || audioType == "mpeg" || mimeType == "audio/mp3":
+		mimeType = "audio/mpeg"
+	case audioType == "alac" || audioType == "m4a" || audioType == "aac" || mimeType == "audio/x-m4a" || mimeType == "audio/mp4":
+		mimeType = "audio/mp4"
+	case audioType == "ogg" || audioType == "opus":
+		mimeType = "audio/ogg"
 	}
 	if mimeType == "" {
 		mimeType = "audio/mpeg"
 	}
 
-	// 3. Clean filename for Content-Disposition
-	filename := track.Telegram.FileName
-	if filename == "" {
-		filename = fmt.Sprintf("%s.mp3", track.ID)
+	// 3. Clean filename for Content-Disposition with proper audio extension
+	cleanBase := ""
+	if track.Audio.Title != "" {
+		if track.Audio.Artist != "" {
+			cleanBase = fmt.Sprintf("%s - %s", track.Audio.Artist, track.Audio.Title)
+		} else {
+			cleanBase = track.Audio.Title
+		}
+	} else if track.Telegram.FileName != "" {
+		cleanBase = strings.TrimSuffix(track.Telegram.FileName, filepath.Ext(track.Telegram.FileName))
+	} else {
+		cleanBase = track.ID
 	}
+
+	ext := audioType
+	if ext == "alac" {
+		ext = "m4a"
+	}
+	if ext == "" {
+		switch mimeType {
+		case "audio/flac":
+			ext = "flac"
+		case "audio/wav":
+			ext = "wav"
+		case "audio/mp4":
+			ext = "m4a"
+		case "audio/ogg":
+			ext = "ogg"
+		default:
+			ext = "mp3"
+		}
+	}
+	filename := fmt.Sprintf("%s.%s", cleanBase, ext)
 
 	serveCachedFLAC := func(filePath string) bool {
 		info, statErr := os.Stat(filePath)
@@ -213,22 +255,56 @@ func (s *StreamService) StreamTrack(w http.ResponseWriter, r *http.Request, trac
 		return true
 	}
 
-	// 3. If track is ALAC (or FLAC requested) and needs decoding, ensure FLAC is ready
+	// 3. If track is ALAC (or FLAC requested) and needs decoding, serve consistent WAV stream
 	if s.alacService != nil && s.alacService.ShouldDecodeALAC(r, track) {
-		flacPath, err := s.alacService.EnsureDecodedFLAC(ctx, track)
-		if err == nil && flacPath != "" {
-			if serveCachedFLAC(flacPath) {
-				return
-			}
-		} else if err != nil {
-			logStream.Warnf("Failed to transcode ALAC track %s to FLAC: %v; falling back to direct stream", track.ID, err)
+		cacheFile := filepath.Join(s.mediaDir, "alac_cache", fmt.Sprintf("%s.flac", track.ID))
+
+		// Kick off background FLAC cache if not already running
+		go s.alacService.EnsureDecodedFLAC(context.Background(), track)
+
+		// Serve on-the-fly WAV stream with full seek support (reads from local cacheFile if ready, else on-the-fly)
+		wavStreamer := NewALACWAVStreamer(track, s.alacService.cfg.Port, cacheFile)
+		defer wavStreamer.Close()
+
+		// Increment play count asynchronously
+		go func(tid string) {
+			timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = s.repo.IncrementPlayCount(timeoutCtx, tid)
+		}(track.ID)
+
+		cleanBase := track.Audio.Title
+		if track.Audio.Artist != "" {
+			cleanBase = fmt.Sprintf("%s - %s", track.Audio.Artist, track.Audio.Title)
 		}
+		if cleanBase == "" {
+			cleanBase = track.Telegram.FileName
+		}
+		if cleanBase == "" {
+			cleanBase = track.ID
+		}
+		cleanBase = strings.TrimSuffix(cleanBase, filepath.Ext(cleanBase))
+		wavFilename := fmt.Sprintf("%s.wav", cleanBase)
+
+		fallback := strings.ReplaceAll(wavFilename, `"`, `_`)
+		encoded := url.QueryEscape(wavFilename)
+
+		w.Header().Set("Content-Type", "audio/wav")
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"; filename*=UTF-8''%s`, fallback, encoded))
+
+		// http.ServeContent handles all Range parsing and chunking automatically!
+		http.ServeContent(w, r, wavFilename, time.Now(), wavStreamer)
+		return
 	}
 
-	// Check if local cache file exists (e.g. decoded ALAC/FLAC)
-	cacheFile := filepath.Join(s.mediaDir, "alac_cache", fmt.Sprintf("%s.flac", track.ID))
-	if serveCachedFLAC(cacheFile) {
-		return
+	// For non-decoded tracks, do not hijack with cached FLAC if raw format was explicitly requested
+	rawParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if rawParam != "raw" && rawParam != "alac" && rawParam != "original" && rawParam != "source" {
+		cacheFile := filepath.Join(s.mediaDir, "alac_cache", fmt.Sprintf("%s.flac", track.ID))
+		if serveCachedFLAC(cacheFile) {
+			return
+		}
 	}
 
 	// 4. Handle Range Header
@@ -516,6 +592,11 @@ func (s *StreamService) streamFromTelegram(
 			data = data[:bytesRemaining]
 		}
 
+		// Sanitize corrupted FLAC metadata blocks (e.g. picture block with mime_len <= 0) on the first chunk
+		if startOffset == 0 && chunkOffset == 0 && len(data) >= 8 && string(data[:4]) == "fLaC" {
+			sanitizeFLACHeader(data)
+		}
+
 		written, writeErr := w.Write(data)
 		if flusher != nil {
 			flusher.Flush()
@@ -556,6 +637,32 @@ func (s *StreamService) WarmTrack(ctx context.Context, id string) {
 	}
 }
 
+// sanitizeFLACHeader inspects FLAC metadata blocks and converts corrupt picture blocks (mime_len <= 0)
+// into harmless PADDING blocks so that Chromium/Edge demuxers don't abort with AVERROR_INVALIDDATA.
+func sanitizeFLACHeader(data []byte) {
+	if len(data) < 8 || string(data[:4]) != "fLaC" {
+		return
+	}
+	pos := 4
+	for pos+4 <= len(data) {
+		b0 := data[pos]
+		isLast := (b0 & 0x80) != 0
+		blockType := b0 & 0x7F
+		length := int(data[pos+1])<<16 | int(data[pos+2])<<8 | int(data[pos+3])
+		if blockType == 6 { // PICTURE block
+			if pos+4+8 <= len(data) {
+				mimeLen := int(binary.BigEndian.Uint32(data[pos+4+4 : pos+4+8]))
+				if mimeLen <= 0 {
+					data[pos] = (b0 & 0x80) | 1 // Convert to block type 1 (PADDING)
+					logStream.Infof("Sanitized corrupted FLAC picture block (mime_len=%d) to PADDING at offset %d", mimeLen, pos)
+				}
+			}
+		}
+		pos += 4 + length
+		if isLast {
+			break
+		}
+	}
 // IsTelegramReady returns whether the Telegram streaming service has at least one connected worker.
 func (s *StreamService) IsTelegramReady() bool {
 	return s.tgService != nil && s.tgService.IsReady()

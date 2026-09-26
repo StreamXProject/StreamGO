@@ -80,6 +80,57 @@ func TestIsALACTrack(t *testing.T) {
 			},
 			expected: false,
 		},
+		{
+			name: "M4A with BitDepth (ALAC lossless)",
+			track: &models.Track{
+				Audio: models.AudioMeta{
+					Type:     "m4a",
+					BitDepth: func() *int32 { v := int32(16); return &v }(),
+				},
+				Telegram: models.TelegramMeta{MimeType: "audio/mp4"},
+			},
+			expected: true,
+		},
+		{
+			name: "M4A with Lossless Bitrate (> 450 kbps)",
+			track: &models.Track{
+				Audio: models.AudioMeta{
+					Type:        "m4a",
+					BitrateKbps: func() *int32 { v := int32(761); return &v }(),
+				},
+				Telegram: models.TelegramMeta{MimeType: "audio/mp4"},
+			},
+			expected: true,
+		},
+		{
+			name: "M4A with Calculated High Bitrate from FileSize and Duration",
+			track: &models.Track{
+				Audio: models.AudioMeta{
+					Type:        "m4a",
+					DurationSec: 155,
+				},
+				Telegram: models.TelegramMeta{
+					MimeType: "audio/mp4",
+					FileSize: 15178406,
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "M4A Standard Lossy AAC (256 kbps, no bit depth)",
+			track: &models.Track{
+				Audio: models.AudioMeta{
+					Type:        "m4a",
+					BitrateKbps: func() *int32 { v := int32(256); return &v }(),
+					DurationSec: 200,
+				},
+				Telegram: models.TelegramMeta{
+					MimeType: "audio/mp4",
+					FileSize: 6400000,
+				},
+			},
+			expected: false,
+		},
 	}
 
 	for _, tt := range tests {
