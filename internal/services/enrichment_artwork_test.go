@@ -119,3 +119,39 @@ func TestEnrichment_ExtractCompressAndUpload(t *testing.T) {
 		t.Fatalf("Unexpected request path: %s", receivedPath)
 	}
 }
+
+func TestEnrichment_AlbumSiblingCache_ExternalAndR2(t *testing.T) {
+	r2 := NewR2StorageService(nil) // Unconfigured / free mode
+	albumID := "album_abbey_road_1969"
+
+	// 1. Initial lookup is empty
+	if cover, big := r2.GetAlbumCovers(albumID); cover != "" || big != "" {
+		t.Fatalf("Expected empty R2 covers, got %s, %s", cover, big)
+	}
+	if ext := r2.GetAlbumExternalCover(albumID); ext != "" {
+		t.Fatalf("Expected empty external cover, got %s", ext)
+	}
+
+	// 2. Set external cover (from iTunes / Deezer)
+	mockItunesURL := "https://is1-ssl.mzstatic.com/image/thumb/Music/v4/abbey_road.jpg/1000x1000bb.jpg"
+	r2.SetAlbumExternalCover(albumID, mockItunesURL)
+
+	if ext := r2.GetAlbumExternalCover(albumID); ext != mockItunesURL {
+		t.Fatalf("Expected external cover %s, got %s", mockItunesURL, ext)
+	}
+
+	// 3. Set R2 dual covers
+	r2Thumb := "https://covers.cdn.streamx.live/covers/thumb_200.webp"
+	r2Big := "https://covers.cdn.streamx.live/covers/master_1000.webp"
+	r2.SetAlbumCovers(albumID, r2Thumb, r2Big)
+
+	gotThumb, gotBig := r2.GetAlbumCovers(albumID)
+	if gotThumb != r2Thumb || gotBig != r2Big {
+		t.Fatalf("Expected (%s, %s), got (%s, %s)", r2Thumb, r2Big, gotThumb, gotBig)
+	}
+
+	// 4. Verify external cover was not overwritten by SetAlbumCovers
+	if ext := r2.GetAlbumExternalCover(albumID); ext != mockItunesURL {
+		t.Fatalf("External cover was overwritten! Expected %s, got %s", mockItunesURL, ext)
+	}
+}

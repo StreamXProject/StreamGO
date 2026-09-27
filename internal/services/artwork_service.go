@@ -58,6 +58,88 @@ func (s *ArtworkService) ExtractArtwork(data []byte, formatHint string) ([]byte,
 	return nil, "", fmt.Errorf("no embedded artwork found in audio chunk")
 }
 
+// IsArtworkTruncated inspects container metadata headers (FLAC, MP4/ALAC, or ID3)
+// to detect if embedded artwork or container tags extend beyond the currently downloaded slice.
+func (s *ArtworkService) IsArtworkTruncated(data []byte, formatHint string) bool {
+	if len(data) < 4 {
+		return false
+	}
+	hint := strings.ToLower(strings.TrimSpace(formatHint))
+
+	// 1. FLAC Container
+	if hint == "flac" || (len(data) >= 4 && string(data[:4]) == "fLaC") {
+		if len(data) >= 4 && string(data[:4]) == "fLaC" {
+			offset := 4
+			for offset+4 <= len(data) {
+				header := data[offset]
+				isLast := (header & 0x80) != 0
+				blockType := header & 0x7F
+				length := int(binary.BigEndian.Uint32([]byte{0, data[offset+1], data[offset+2], data[offset+3]}))
+				offset += 4
+
+				if offset+length > len(data) {
+					// Either a picture block is cut off, or subsequent metadata blocks (potentially picture) are cut off
+					return true
+				}
+				if blockType == 6 {
+					// PICTURE block is fully present in this slice (or corrupted)
+					return false
+				}
+				if isLast {
+					// Reached last metadata block without encountering PICTURE block
+					return false
+				}
+				offset += length
+			}
+			return true // Slice ended inside block header before isLast
+		}
+	}
+
+	// 2. MP4 / ALAC / M4A Container
+	if hint == "alac" || hint == "m4a" || bytes.Contains(data, []byte("covr")) || bytes.Contains(data, []byte("moov")) || bytes.Contains(data, []byte("ftyp")) {
+		if needed, ok := InspectMP4CoverNeeds(data); ok {
+			return needed > int64(len(data))
+		}
+		if moovIdx := bytes.Index(data, []byte("moov")); moovIdx >= 4 {
+			moovSize := int64(binary.BigEndian.Uint32(data[moovIdx-4 : moovIdx]))
+			if moovSize == 1 && moovIdx+12 <= len(data) {
+				moovSize = int64(binary.BigEndian.Uint64(data[moovIdx+4 : moovIdx+12]))
+			}
+			if moovSize > 0 && int64(moovIdx-4)+moovSize > int64(len(data)) {
+				return true
+			}
+		}
+	}
+
+	// 3. ID3v2 (MP3, AAC)
+	if hint == "mp3" || (len(data) >= 3 && string(data[:3]) == "ID3") || bytes.Contains(data, []byte("APIC")) {
+		if len(data) >= 10 && string(data[:3]) == "ID3" {
+			tagSize := int(data[6]&0x7F)<<21 | int(data[7]&0x7F)<<14 | int(data[8]&0x7F)<<7 | int(data[9]&0x7F)
+			if int64(10+tagSize) > int64(len(data)) {
+				return true
+			}
+		}
+		if apicIdx := bytes.Index(data, []byte("APIC")); apicIdx != -1 {
+			if apicIdx+10 > len(data) {
+				return true
+			}
+			isV4 := len(data) >= 4 && data[0] == 'I' && data[1] == 'D' && data[2] == '3' && data[3] == 4
+			var frameSize int
+			if isV4 {
+				b := data[apicIdx+4 : apicIdx+8]
+				frameSize = int(b[0]&0x7F)<<21 | int(b[1]&0x7F)<<14 | int(b[2]&0x7F)<<7 | int(b[3]&0x7F)
+			} else {
+				frameSize = int(binary.BigEndian.Uint32(data[apicIdx+4 : apicIdx+8]))
+			}
+			if apicIdx+10+frameSize > len(data) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // CompressToWebP compresses and resizes raw image bytes into WebP format using an in-memory FFmpeg pipe.
 // maxDim sets maximum width/height (aspect ratio preserved). quality is 0-100 (default 80).
 func (s *ArtworkService) CompressToWebP(ctx context.Context, raw []byte, maxDim int, quality int) ([]byte, error) {

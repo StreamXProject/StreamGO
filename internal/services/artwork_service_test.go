@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"strings"
 	"testing"
 )
 
@@ -178,5 +179,117 @@ func TestArtworkService_ExtractID3Picture_JPEG_V23(t *testing.T) {
 	}
 	if !bytes.Equal(extracted, testJPEG) {
 		t.Fatalf("Extracted JPEG did not match expected (len %d vs %d)", len(extracted), len(testJPEG))
+	}
+}
+
+func TestArtworkService_IsArtworkTruncated_ID3(t *testing.T) {
+	svc := NewArtworkService()
+
+	// Truncated: ID3 tag header declared 10,000 bytes, but slice only has 50 bytes
+	var truncatedID3 bytes.Buffer
+	truncatedID3.WriteString("ID3")
+	truncatedID3.WriteByte(3) // v2.3
+	truncatedID3.WriteByte(0)
+	truncatedID3.WriteByte(0)
+	// Syncsafe size 10000: 0x00, 0x00, 0x4e, 0x10
+	truncatedID3.Write([]byte{0, 0, 0x4e, 0x10})
+	truncatedID3.WriteString(strings.Repeat("A", 40))
+
+	if !svc.IsArtworkTruncated(truncatedID3.Bytes(), "mp3") {
+		t.Fatal("Expected IsArtworkTruncated to return true for truncated ID3 tag")
+	}
+
+	// Not truncated: complete ID3 tag with 10 bytes content and isLast
+	var completeID3 bytes.Buffer
+	completeID3.WriteString("ID3")
+	completeID3.WriteByte(3)
+	completeID3.WriteByte(0)
+	completeID3.WriteByte(0)
+	completeID3.Write([]byte{0, 0, 0, 10}) // size 10
+	completeID3.WriteString("0123456789")
+
+	if svc.IsArtworkTruncated(completeID3.Bytes(), "mp3") {
+		t.Fatal("Expected IsArtworkTruncated to return false for complete ID3 tag with no APIC")
+	}
+}
+
+func TestArtworkService_IsArtworkTruncated_FLAC(t *testing.T) {
+	svc := NewArtworkService()
+
+	// Truncated FLAC: Block type 6 (PICTURE), length 5000, slice only has 20 bytes
+	var truncatedFLAC bytes.Buffer
+	truncatedFLAC.WriteString("fLaC")
+	// Block header: byte 0 = 6 (PICTURE, not last), bytes 1-3 = 5000 (0x00, 0x13, 0x88)
+	truncatedFLAC.Write([]byte{6, 0x00, 0x13, 0x88})
+	truncatedFLAC.WriteString(strings.Repeat("X", 16))
+
+	if !svc.IsArtworkTruncated(truncatedFLAC.Bytes(), "flac") {
+		t.Fatal("Expected IsArtworkTruncated to return true for truncated FLAC picture block")
+	}
+
+	// Clean FLAC: Block type 0 (STREAMINFO, isLast = true), length 34 bytes, followed by data
+	var completeFLAC bytes.Buffer
+	completeFLAC.WriteString("fLaC")
+	// Header: 0x80 | 0 = 0x80 (isLast = true, type = 0)
+	completeFLAC.Write([]byte{0x80, 0x00, 0x00, 34})
+	completeFLAC.Write(make([]byte, 34))
+
+	if svc.IsArtworkTruncated(completeFLAC.Bytes(), "flac") {
+		t.Fatal("Expected IsArtworkTruncated to return false for clean FLAC metadata with no picture")
+	}
+}
+
+func TestArtworkService_IsArtworkTruncated_MP4(t *testing.T) {
+	svc := NewArtworkService()
+
+	// Truncated MP4 covr: covr atom present with data atom requiring 8000 bytes, but slice is small
+	var truncatedMP4 bytes.Buffer
+	truncatedMP4.WriteString("ftypM4A ")
+	truncatedMP4.WriteString("moov")
+	truncatedMP4.WriteString("covr")
+	// 4 bytes length before data
+	truncatedMP4.Write([]byte{0, 0, 0x20, 0}) // data atom length = 8192
+	truncatedMP4.WriteString("data")
+	truncatedMP4.Write([]byte{0, 0, 0, 13}) // jpeg
+	truncatedMP4.Write([]byte{0, 0, 0, 0})
+	truncatedMP4.WriteString("short data")
+
+	if !svc.IsArtworkTruncated(truncatedMP4.Bytes(), "alac") {
+		t.Fatal("Expected IsArtworkTruncated to return true for truncated MP4 covr atom")
+	}
+
+	// Complete MP4: covr atom is complete
+	testImg := createTestJPEG(40, 40)
+	completeMP4 := createTestMP4CovrChunk(testImg)
+	if svc.IsArtworkTruncated(completeMP4, "alac") {
+		t.Fatal("Expected IsArtworkTruncated to return false for complete MP4 covr")
+	}
+}
+
+func TestArtworkService_DimensionsCap(t *testing.T) {
+	testImg := createTestJPEG(1200, 1200)
+	svc := NewArtworkService()
+
+	// 1. Big cover max 1000x1000
+	bigWebP, err := svc.CompressToWebP(context.Background(), testImg, 1000, 80)
+	if err != nil {
+		t.Fatalf("Failed to compress 1000x1000 master WebP: %v", err)
+	}
+	if len(bigWebP) == 0 {
+		t.Fatal("Expected non-empty big cover WebP")
+	}
+
+	// 2. Preview cover max 200x200
+	prevWebP, err := svc.CompressToWebP(context.Background(), testImg, 200, 75)
+	if err != nil {
+		t.Fatalf("Failed to compress 200x200 preview WebP: %v", err)
+	}
+	if len(prevWebP) == 0 {
+		t.Fatal("Expected non-empty preview WebP")
+	}
+
+	// Preview WebP must be significantly smaller than big WebP
+	if len(prevWebP) >= len(bigWebP) {
+		t.Fatalf("Expected 200x200 preview (%d bytes) to be smaller than 1000x1000 master (%d bytes)", len(prevWebP), len(bigWebP))
 	}
 }
