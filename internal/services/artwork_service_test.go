@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"strings"
 	"testing"
 )
 
@@ -178,5 +179,197 @@ func TestArtworkService_ExtractID3Picture_JPEG_V23(t *testing.T) {
 	}
 	if !bytes.Equal(extracted, testJPEG) {
 		t.Fatalf("Extracted JPEG did not match expected (len %d vs %d)", len(extracted), len(testJPEG))
+	}
+}
+
+func TestArtworkService_IsArtworkTruncated_ID3(t *testing.T) {
+	svc := NewArtworkService()
+
+	// Truncated: ID3 tag header declared 10,000 bytes, but slice only has 50 bytes
+	var truncatedID3 bytes.Buffer
+	truncatedID3.WriteString("ID3")
+	truncatedID3.WriteByte(3) // v2.3
+	truncatedID3.WriteByte(0)
+	truncatedID3.WriteByte(0)
+	// Syncsafe size 10000: 0x00, 0x00, 0x4e, 0x10
+	truncatedID3.Write([]byte{0, 0, 0x4e, 0x10})
+	truncatedID3.WriteString(strings.Repeat("A", 40))
+
+	if !svc.IsArtworkTruncated(truncatedID3.Bytes(), "mp3") {
+		t.Fatal("Expected IsArtworkTruncated to return true for truncated ID3 tag")
+	}
+
+	// Not truncated: complete ID3 tag with 10 bytes content and isLast
+	var completeID3 bytes.Buffer
+	completeID3.WriteString("ID3")
+	completeID3.WriteByte(3)
+	completeID3.WriteByte(0)
+	completeID3.WriteByte(0)
+	completeID3.Write([]byte{0, 0, 0, 10}) // size 10
+	completeID3.WriteString("0123456789")
+
+	if svc.IsArtworkTruncated(completeID3.Bytes(), "mp3") {
+		t.Fatal("Expected IsArtworkTruncated to return false for complete ID3 tag with no APIC")
+	}
+}
+
+func TestArtworkService_IsArtworkTruncated_FLAC(t *testing.T) {
+	svc := NewArtworkService()
+
+	// Truncated FLAC: Block type 6 (PICTURE), length 5000, slice only has 20 bytes
+	var truncatedFLAC bytes.Buffer
+	truncatedFLAC.WriteString("fLaC")
+	// Block header: byte 0 = 6 (PICTURE, not last), bytes 1-3 = 5000 (0x00, 0x13, 0x88)
+	truncatedFLAC.Write([]byte{6, 0x00, 0x13, 0x88})
+	truncatedFLAC.WriteString(strings.Repeat("X", 16))
+
+	if !svc.IsArtworkTruncated(truncatedFLAC.Bytes(), "flac") {
+		t.Fatal("Expected IsArtworkTruncated to return true for truncated FLAC picture block")
+	}
+
+	// Clean FLAC: Block type 0 (STREAMINFO, isLast = true), length 34 bytes, followed by data
+	var completeFLAC bytes.Buffer
+	completeFLAC.WriteString("fLaC")
+	// Header: 0x80 | 0 = 0x80 (isLast = true, type = 0)
+	completeFLAC.Write([]byte{0x80, 0x00, 0x00, 34})
+	completeFLAC.Write(make([]byte, 34))
+
+	if svc.IsArtworkTruncated(completeFLAC.Bytes(), "flac") {
+		t.Fatal("Expected IsArtworkTruncated to return false for clean FLAC metadata with no picture")
+	}
+}
+
+func TestArtworkService_IsArtworkTruncated_MP4(t *testing.T) {
+	svc := NewArtworkService()
+
+	// Truncated MP4 covr: covr atom present with data atom requiring 8000 bytes, but slice is small
+	var truncatedMP4 bytes.Buffer
+	truncatedMP4.WriteString("ftypM4A ")
+	truncatedMP4.WriteString("moov")
+	truncatedMP4.WriteString("covr")
+	// 4 bytes length before data
+	truncatedMP4.Write([]byte{0, 0, 0x20, 0}) // data atom length = 8192
+	truncatedMP4.WriteString("data")
+	truncatedMP4.Write([]byte{0, 0, 0, 13}) // jpeg
+	truncatedMP4.Write([]byte{0, 0, 0, 0})
+	truncatedMP4.WriteString("short data")
+
+	if !svc.IsArtworkTruncated(truncatedMP4.Bytes(), "alac") {
+		t.Fatal("Expected IsArtworkTruncated to return true for truncated MP4 covr atom")
+	}
+
+	// Complete MP4: covr atom is complete
+	testImg := createTestJPEG(40, 40)
+	completeMP4 := createTestMP4CovrChunk(testImg)
+	if svc.IsArtworkTruncated(completeMP4, "alac") {
+		t.Fatal("Expected IsArtworkTruncated to return false for complete MP4 covr")
+	}
+}
+
+func TestArtworkService_DimensionsCap(t *testing.T) {
+	testImg := createTestJPEG(1200, 1200)
+	svc := NewArtworkService()
+
+	// 1. Big cover max 1000x1000
+	bigWebP, err := svc.CompressToWebP(context.Background(), testImg, 1000, 80)
+	if err != nil {
+		t.Fatalf("Failed to compress 1000x1000 master WebP: %v", err)
+	}
+	if len(bigWebP) == 0 {
+		t.Fatal("Expected non-empty big cover WebP")
+	}
+
+	// 2. Preview cover max 200x200
+	prevWebP, err := svc.CompressToWebP(context.Background(), testImg, 200, 75)
+	if err != nil {
+		t.Fatalf("Failed to compress 200x200 preview WebP: %v", err)
+	}
+	if len(prevWebP) == 0 {
+		t.Fatal("Expected non-empty preview WebP")
+	}
+
+	// Preview WebP must be significantly smaller than big WebP
+	if len(prevWebP) >= len(bigWebP) {
+		t.Fatalf("Expected 200x200 preview (%d bytes) to be smaller than 1000x1000 master (%d bytes)", len(prevWebP), len(bigWebP))
+	}
+}
+
+func TestArtworkService_SanitizeAndValidateWebP(t *testing.T) {
+	svc := NewArtworkService()
+	testImg := createTestJPEG(100, 100)
+	validWebP, err := svc.CompressToWebP(context.Background(), testImg, 100, 80)
+	if err != nil {
+		t.Fatalf("Failed to generate test WebP: %v", err)
+	}
+
+	// 1. Valid WebP passes cleanly
+	sanitized, w, h, err := SanitizeAndValidateWebP(validWebP)
+	if err != nil {
+		t.Fatalf("Valid WebP rejected: %v", err)
+	}
+	if w != 100 || h != 100 {
+		t.Fatalf("Expected 100x100, got %dx%d", w, h)
+	}
+	if len(sanitized) != len(validWebP) {
+		t.Fatalf("Length changed for already valid WebP: %d != %d", len(sanitized), len(validWebP))
+	}
+
+	// 2. Simulates FFmpeg non-seekable pipe bug (RIFF size = 0 and 4 trailing bytes)
+	corruptBytes := make([]byte, len(validWebP)+4)
+	copy(corruptBytes, validWebP)
+	// Zero out bytes 4..7 (RIFF size)
+	corruptBytes[4], corruptBytes[5], corruptBytes[6], corruptBytes[7] = 0, 0, 0, 0
+	// Append 4 trailing bytes
+	corruptBytes[len(validWebP)] = 0xAA
+	corruptBytes[len(validWebP)+1] = 0xBB
+	corruptBytes[len(validWebP)+2] = 0x00
+	corruptBytes[len(validWebP)+3] = 0x00
+
+	repaired, repW, repH, repErr := SanitizeAndValidateWebP(corruptBytes)
+	if repErr != nil {
+		t.Fatalf("Failed to repair FFmpeg-style corrupt WebP: %v", repErr)
+	}
+	if repW != 100 || repH != 100 {
+		t.Fatalf("Repaired dimensions mismatch: %dx%d", repW, repH)
+	}
+	if len(repaired) != len(validWebP) {
+		t.Fatalf("Repaired length mismatch: %d != %d", len(repaired), len(validWebP))
+	}
+	repairedRiffSize := binary.LittleEndian.Uint32(repaired[4:8])
+	if repairedRiffSize != uint32(len(repaired)-8) {
+		t.Fatalf("RIFF size not patched: %d != %d", repairedRiffSize, len(repaired)-8)
+	}
+
+	// 3. Reject bad inputs
+	// Too short
+	if _, _, _, err := SanitizeAndValidateWebP([]byte("RIFF123")); err == nil {
+		t.Fatal("Expected error for short data, got nil")
+	}
+
+	// Bad magic bytes
+	if _, _, _, err := SanitizeAndValidateWebP([]byte("NOT_A_WEBP_IMAGE_PAYLOAD_HERE")); err == nil {
+		t.Fatal("Expected error for non-RIFF/WEBP, got nil")
+	}
+
+	// Bad chunk type
+	badFourCC := make([]byte, len(validWebP))
+	copy(badFourCC, validWebP)
+	copy(badFourCC[12:16], []byte("JPEG"))
+	if _, _, _, err := SanitizeAndValidateWebP(badFourCC); err == nil {
+		t.Fatal("Expected error for bad FourCC, got nil")
+	}
+
+	// Truncated payload
+	truncated := validWebP[:25]
+	if _, _, _, err := SanitizeAndValidateWebP(truncated); err == nil {
+		t.Fatal("Expected error for truncated payload, got nil")
+	}
+
+	// Corrupted VP8 start code
+	badStartCode := make([]byte, len(validWebP))
+	copy(badStartCode, validWebP)
+	badStartCode[23] = 0x00
+	if _, _, _, err := SanitizeAndValidateWebP(badStartCode); err == nil {
+		t.Fatal("Expected error for corrupt VP8 start code, got nil")
 	}
 }

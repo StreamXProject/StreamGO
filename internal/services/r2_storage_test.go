@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"strings"
@@ -96,7 +97,7 @@ func TestR2StorageService_UploadMock(t *testing.T) {
 		albumCoverCache: make(map[string]AlbumCovers),
 	}
 
-	validWebP := append([]byte("RIFF\x20\x00\x00\x00WEBPVP8 "), []byte("sample-payload-bytes")...)
+	validWebP, _ := hex.DecodeString("524946463c000000574542505650382030000000d001009d012a0100010002003425a00274ba01f80003b000fef0e8f7ff20b96175c8d7ff203fe407fc80fff8f2000000")
 	url, err := svc.UploadCover(context.Background(), "hash123", validWebP, "image/webp")
 	if err != nil {
 		t.Fatalf("UploadCover failed: %v", err)
@@ -160,7 +161,13 @@ func TestR2StorageService_RejectsNonImageAndOversized(t *testing.T) {
 		t.Fatal("Expected error when uploading oversized payload, got nil")
 	}
 
-	// 5. Accepts genuine JPEG
+	// 5. Rejects corrupted WebP (e.g. truncated or bad bitstream)
+	badWebP := []byte("RIFF\x00\x00\x00\x00WEBPcorrupted-garbage")
+	if _, err := svc.UploadCover(ctx, "hash_bad_webp", badWebP, "image/webp"); err == nil {
+		t.Fatal("Expected error when uploading corrupted WebP bytes, got nil")
+	}
+
+	// 6. Accepts genuine JPEG
 	validJPEG := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00}
 	url, err := svc.UploadCover(ctx, "valid_jpeg", validJPEG, "")
 	if err != nil {

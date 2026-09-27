@@ -18,10 +18,11 @@ import (
 
 var logR2 = logger.New("r2_storage")
 
-// AlbumCovers holds cached public R2 URLs for preview and master covers.
+// AlbumCovers holds cached public R2 URLs for preview and master covers, as well as external iTunes/Deezer cover URLs.
 type AlbumCovers struct {
-	CoverURL    string // lightweight thumbnail for list previews
-	BigCoverURL string // master 1000x1000 artwork
+	CoverURL         string // lightweight thumbnail for list previews
+	BigCoverURL      string // master 1000x1000 artwork
+	ExternalCoverURL string // external iTunes/Deezer cover URL
 }
 
 // R2StorageService provides optional Cloudflare R2 / S3-compatible blob storage
@@ -72,7 +73,7 @@ func (s *R2StorageService) IsConfigured() bool {
 
 // GetAlbumCover returns the cached public R2 master/big cover URL for an album, if present.
 func (s *R2StorageService) GetAlbumCover(albumID string) string {
-	if albumID == "" {
+	if s == nil || albumID == "" {
 		return ""
 	}
 	s.mu.RLock()
@@ -86,7 +87,7 @@ func (s *R2StorageService) GetAlbumCover(albumID string) string {
 
 // GetAlbumCovers returns the cached preview thumbnail and master artwork R2 URLs for an album.
 func (s *R2StorageService) GetAlbumCovers(albumID string) (coverURL, bigCoverURL string) {
-	if albumID == "" {
+	if s == nil || albumID == "" {
 		return "", ""
 	}
 	s.mu.RLock()
@@ -95,9 +96,31 @@ func (s *R2StorageService) GetAlbumCovers(albumID string) (coverURL, bigCoverURL
 	return entry.CoverURL, entry.BigCoverURL
 }
 
+// GetAlbumExternalCover returns the cached external (iTunes/Deezer) cover URL for an album, if present.
+func (s *R2StorageService) GetAlbumExternalCover(albumID string) string {
+	if s == nil || albumID == "" {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.albumCoverCache[albumID].ExternalCoverURL
+}
+
+// SetAlbumExternalCover caches the external (iTunes/Deezer) cover URL for an album.
+func (s *R2StorageService) SetAlbumExternalCover(albumID, externalCoverURL string) {
+	if s == nil || albumID == "" || externalCoverURL == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry := s.albumCoverCache[albumID]
+	entry.ExternalCoverURL = externalCoverURL
+	s.albumCoverCache[albumID] = entry
+}
+
 // SetAlbumCover caches the public R2 cover URL for an album.
 func (s *R2StorageService) SetAlbumCover(albumID, coverURL string) {
-	if albumID == "" || coverURL == "" {
+	if s == nil || albumID == "" || coverURL == "" {
 		return
 	}
 	s.mu.Lock()
@@ -112,15 +135,19 @@ func (s *R2StorageService) SetAlbumCover(albumID, coverURL string) {
 
 // SetAlbumCovers caches both the preview and master R2 cover URLs for an album.
 func (s *R2StorageService) SetAlbumCovers(albumID, coverURL, bigCoverURL string) {
-	if albumID == "" {
+	if s == nil || albumID == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.albumCoverCache[albumID] = AlbumCovers{
-		CoverURL:    coverURL,
-		BigCoverURL: bigCoverURL,
+	entry := s.albumCoverCache[albumID]
+	if coverURL != "" {
+		entry.CoverURL = coverURL
 	}
+	if bigCoverURL != "" {
+		entry.BigCoverURL = bigCoverURL
+	}
+	s.albumCoverCache[albumID] = entry
 }
 
 // MaxCoverPayloadBytes defines the maximum allowed file size for cover art uploads (5 MB).
@@ -142,7 +169,10 @@ func DetectImageFormat(data []byte) (mimeType string, ext string, ok bool) {
 	}
 	// WebP: RIFF....WEBP
 	if len(data) >= 12 && string(data[0:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
-		return "image/webp", "webp", true
+		if _, _, _, err := SanitizeAndValidateWebP(data); err == nil {
+			return "image/webp", "webp", true
+		}
+		return "", "", false
 	}
 	return "", "", false
 }
@@ -167,7 +197,15 @@ func (s *R2StorageService) UploadCover(ctx context.Context, hash string, data []
 		if len(preview) > 8 {
 			preview = preview[:8]
 		}
-		return "", fmt.Errorf("refusing to upload non-image payload to R2 (detected header: %x)", preview)
+		return "", fmt.Errorf("refusing to upload non-image or invalid payload to R2 (detected header: %x)", preview)
+	}
+
+	if detectedMime == "image/webp" {
+		sanitized, _, _, err := SanitizeAndValidateWebP(data)
+		if err != nil {
+			return "", fmt.Errorf("refusing to upload invalid/corrupted WebP to R2: %w", err)
+		}
+		data = sanitized
 	}
 
 	if contentType == "" {
