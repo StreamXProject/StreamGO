@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -140,7 +141,125 @@ func (s *ArtworkService) IsArtworkTruncated(data []byte, formatHint string) bool
 	return false
 }
 
-// CompressToWebP compresses and resizes raw image bytes into WebP format using an in-memory FFmpeg pipe.
+// SanitizeAndValidateWebP validates WebP container structure and payload integrity.
+// If the WebP bitstream has missing RIFF length or trailing muxer bytes (common when muxers cannot seek),
+// it repairs the header and strips trailing bytes.
+// Returns the sanitized byte slice, image dimensions, or an error if invalid/corrupt.
+func SanitizeAndValidateWebP(data []byte) ([]byte, int, int, error) {
+	if len(data) < 20 {
+		return nil, 0, 0, fmt.Errorf("data too short for WebP (%d bytes)", len(data))
+	}
+	if string(data[0:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
+		return nil, 0, 0, fmt.Errorf("missing RIFF/WEBP magic bytes")
+	}
+
+	fourCC := string(data[12:16])
+	chunkLen := binary.LittleEndian.Uint32(data[16:20])
+
+	switch fourCC {
+	case "VP8 ":
+		// Simple lossy WebP
+		expectedLen := 12 + 8 + int(chunkLen) + int(chunkLen%2)
+		if len(data) < expectedLen {
+			return nil, 0, 0, fmt.Errorf("truncated VP8 chunk: have %d bytes, need %d", len(data), expectedLen)
+		}
+
+		result := data
+		if len(result) > expectedLen {
+			result = result[:expectedLen]
+		}
+
+		riffSize := binary.LittleEndian.Uint32(result[4:8])
+		expectedRiffSize := uint32(len(result) - 8)
+		if riffSize != expectedRiffSize {
+			newBuf := make([]byte, len(result))
+			copy(newBuf, result)
+			binary.LittleEndian.PutUint32(newBuf[4:8], expectedRiffSize)
+			result = newBuf
+		}
+
+		payload := result[20:]
+		if len(payload) < 10 {
+			return nil, 0, 0, fmt.Errorf("VP8 payload too short (%d bytes)", len(payload))
+		}
+		// Bit 0 of payload[0] is frame type (0 = keyframe, 1 = interframe)
+		if (payload[0] & 0x01) != 0 {
+			return nil, 0, 0, fmt.Errorf("VP8 is not a keyframe")
+		}
+		// Start code bytes 3, 4, 5: 0x9d 0x01 0x2a
+		if payload[3] != 0x9d || payload[4] != 0x01 || payload[5] != 0x2a {
+			return nil, 0, 0, fmt.Errorf("invalid VP8 keyframe start code")
+		}
+		width := int(binary.LittleEndian.Uint16(payload[6:8]) & 0x3fff)
+		height := int(binary.LittleEndian.Uint16(payload[8:10]) & 0x3fff)
+		if width <= 0 || height <= 0 {
+			return nil, 0, 0, fmt.Errorf("invalid VP8 dimensions: %dx%d", width, height)
+		}
+		return result, width, height, nil
+
+	case "VP8L":
+		// Lossless WebP
+		expectedLen := 12 + 8 + int(chunkLen) + int(chunkLen%2)
+		if len(data) < expectedLen {
+			return nil, 0, 0, fmt.Errorf("truncated VP8L chunk: have %d bytes, need %d", len(data), expectedLen)
+		}
+
+		result := data
+		if len(result) > expectedLen {
+			result = result[:expectedLen]
+		}
+
+		riffSize := binary.LittleEndian.Uint32(result[4:8])
+		expectedRiffSize := uint32(len(result) - 8)
+		if riffSize != expectedRiffSize {
+			newBuf := make([]byte, len(result))
+			copy(newBuf, result)
+			binary.LittleEndian.PutUint32(newBuf[4:8], expectedRiffSize)
+			result = newBuf
+		}
+
+		payload := result[20:]
+		if len(payload) < 5 || payload[0] != 0x2f {
+			return nil, 0, 0, fmt.Errorf("invalid VP8L signature byte")
+		}
+		b0, b1, b2, b3 := uint32(payload[1]), uint32(payload[2]), uint32(payload[3]), uint32(payload[4])
+		val := b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+		width := int(val&0x3fff) + 1
+		height := int((val>>14)&0x3fff) + 1
+		if width <= 0 || height <= 0 {
+			return nil, 0, 0, fmt.Errorf("invalid VP8L dimensions: %dx%d", width, height)
+		}
+		return result, width, height, nil
+
+	case "VP8X":
+		// Extended WebP
+		if len(data) < 30 {
+			return nil, 0, 0, fmt.Errorf("VP8X header too short")
+		}
+		result := data
+		riffSize := binary.LittleEndian.Uint32(result[4:8])
+		expectedRiffSize := uint32(len(result) - 8)
+		if riffSize != expectedRiffSize {
+			newBuf := make([]byte, len(result))
+			copy(newBuf, result)
+			binary.LittleEndian.PutUint32(newBuf[4:8], expectedRiffSize)
+			result = newBuf
+		}
+		width := int(uint32(result[24]) | uint32(result[25])<<8 | uint32(result[26])<<16) + 1
+		height := int(uint32(result[27]) | uint32(result[28])<<8 | uint32(result[29])<<16) + 1
+		if width <= 0 || height <= 0 {
+			return nil, 0, 0, fmt.Errorf("invalid VP8X dimensions: %dx%d", width, height)
+		}
+		return result, width, height, nil
+
+	default:
+		return nil, 0, 0, fmt.Errorf("unsupported WebP chunk type: %q", fourCC)
+	}
+}
+
+// CompressToWebP compresses and resizes raw image bytes into WebP format using FFmpeg.
+// It writes to a temporary file so FFmpeg can seek and finalize standard RIFF headers,
+// then sanitizes and verifies the output bitstream to ensure zero corruption.
 // maxDim sets maximum width/height (aspect ratio preserved). quality is 0-100 (default 80).
 func (s *ArtworkService) CompressToWebP(ctx context.Context, raw []byte, maxDim int, quality int) ([]byte, error) {
 	if len(raw) == 0 {
@@ -154,21 +273,28 @@ func (s *ArtworkService) CompressToWebP(ctx context.Context, raw []byte, maxDim 
 	}
 
 	start := time.Now()
+
+	tmpOut, err := os.CreateTemp("", "streamgo_webp_*.webp")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp webp file: %w", err)
+	}
+	tmpPath := tmpOut.Name()
+	_ = tmpOut.Close()
+	defer os.Remove(tmpPath)
+
 	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
+		"-y",
 		"-i", "pipe:0",
 		"-vf", fmt.Sprintf("scale='min(%d,iw)':-1", maxDim),
 		"-c:v", "libwebp",
 		"-quality", fmt.Sprintf("%d", quality),
-		"-f", "webp",
-		"pipe:1",
+		tmpPath,
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.Stdin = bytes.NewReader(raw)
-	var out bytes.Buffer
-	cmd.Stdout = &out
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf
 
@@ -176,11 +302,21 @@ func (s *ArtworkService) CompressToWebP(ctx context.Context, raw []byte, maxDim 
 		return nil, fmt.Errorf("ffmpeg webp compression failed: %w: %s", err, errBuf.String())
 	}
 
-	dur := time.Since(start)
-	logArtwork.Debugf("Compressed artwork to WebP: %d bytes -> %d bytes in %v",
-		len(raw), out.Len(), dur.Round(time.Millisecond))
+	outBytes, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read webp output file: %w", err)
+	}
 
-	return out.Bytes(), nil
+	sanitized, w, h, err := SanitizeAndValidateWebP(outBytes)
+	if err != nil {
+		return nil, fmt.Errorf("generated webp failed validation: %w", err)
+	}
+
+	dur := time.Since(start)
+	logArtwork.Debugf("Compressed artwork to WebP (%dx%d): %d bytes -> %d bytes in %v",
+		w, h, len(raw), len(sanitized), dur.Round(time.Millisecond))
+
+	return sanitized, nil
 }
 
 // ExtractMP4Cover extracts embedded cover art from MP4 / M4A / ALAC atom structure (ilst -> covr -> data).

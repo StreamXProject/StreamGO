@@ -293,3 +293,83 @@ func TestArtworkService_DimensionsCap(t *testing.T) {
 		t.Fatalf("Expected 200x200 preview (%d bytes) to be smaller than 1000x1000 master (%d bytes)", len(prevWebP), len(bigWebP))
 	}
 }
+
+func TestArtworkService_SanitizeAndValidateWebP(t *testing.T) {
+	svc := NewArtworkService()
+	testImg := createTestJPEG(100, 100)
+	validWebP, err := svc.CompressToWebP(context.Background(), testImg, 100, 80)
+	if err != nil {
+		t.Fatalf("Failed to generate test WebP: %v", err)
+	}
+
+	// 1. Valid WebP passes cleanly
+	sanitized, w, h, err := SanitizeAndValidateWebP(validWebP)
+	if err != nil {
+		t.Fatalf("Valid WebP rejected: %v", err)
+	}
+	if w != 100 || h != 100 {
+		t.Fatalf("Expected 100x100, got %dx%d", w, h)
+	}
+	if len(sanitized) != len(validWebP) {
+		t.Fatalf("Length changed for already valid WebP: %d != %d", len(sanitized), len(validWebP))
+	}
+
+	// 2. Simulates FFmpeg non-seekable pipe bug (RIFF size = 0 and 4 trailing bytes)
+	corruptBytes := make([]byte, len(validWebP)+4)
+	copy(corruptBytes, validWebP)
+	// Zero out bytes 4..7 (RIFF size)
+	corruptBytes[4], corruptBytes[5], corruptBytes[6], corruptBytes[7] = 0, 0, 0, 0
+	// Append 4 trailing bytes
+	corruptBytes[len(validWebP)] = 0xAA
+	corruptBytes[len(validWebP)+1] = 0xBB
+	corruptBytes[len(validWebP)+2] = 0x00
+	corruptBytes[len(validWebP)+3] = 0x00
+
+	repaired, repW, repH, repErr := SanitizeAndValidateWebP(corruptBytes)
+	if repErr != nil {
+		t.Fatalf("Failed to repair FFmpeg-style corrupt WebP: %v", repErr)
+	}
+	if repW != 100 || repH != 100 {
+		t.Fatalf("Repaired dimensions mismatch: %dx%d", repW, repH)
+	}
+	if len(repaired) != len(validWebP) {
+		t.Fatalf("Repaired length mismatch: %d != %d", len(repaired), len(validWebP))
+	}
+	repairedRiffSize := binary.LittleEndian.Uint32(repaired[4:8])
+	if repairedRiffSize != uint32(len(repaired)-8) {
+		t.Fatalf("RIFF size not patched: %d != %d", repairedRiffSize, len(repaired)-8)
+	}
+
+	// 3. Reject bad inputs
+	// Too short
+	if _, _, _, err := SanitizeAndValidateWebP([]byte("RIFF123")); err == nil {
+		t.Fatal("Expected error for short data, got nil")
+	}
+
+	// Bad magic bytes
+	if _, _, _, err := SanitizeAndValidateWebP([]byte("NOT_A_WEBP_IMAGE_PAYLOAD_HERE")); err == nil {
+		t.Fatal("Expected error for non-RIFF/WEBP, got nil")
+	}
+
+	// Bad chunk type
+	badFourCC := make([]byte, len(validWebP))
+	copy(badFourCC, validWebP)
+	copy(badFourCC[12:16], []byte("JPEG"))
+	if _, _, _, err := SanitizeAndValidateWebP(badFourCC); err == nil {
+		t.Fatal("Expected error for bad FourCC, got nil")
+	}
+
+	// Truncated payload
+	truncated := validWebP[:25]
+	if _, _, _, err := SanitizeAndValidateWebP(truncated); err == nil {
+		t.Fatal("Expected error for truncated payload, got nil")
+	}
+
+	// Corrupted VP8 start code
+	badStartCode := make([]byte, len(validWebP))
+	copy(badStartCode, validWebP)
+	badStartCode[23] = 0x00
+	if _, _, _, err := SanitizeAndValidateWebP(badStartCode); err == nil {
+		t.Fatal("Expected error for corrupt VP8 start code, got nil")
+	}
+}

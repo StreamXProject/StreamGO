@@ -169,7 +169,10 @@ func DetectImageFormat(data []byte) (mimeType string, ext string, ok bool) {
 	}
 	// WebP: RIFF....WEBP
 	if len(data) >= 12 && string(data[0:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
-		return "image/webp", "webp", true
+		if _, _, _, err := SanitizeAndValidateWebP(data); err == nil {
+			return "image/webp", "webp", true
+		}
+		return "", "", false
 	}
 	return "", "", false
 }
@@ -194,7 +197,15 @@ func (s *R2StorageService) UploadCover(ctx context.Context, hash string, data []
 		if len(preview) > 8 {
 			preview = preview[:8]
 		}
-		return "", fmt.Errorf("refusing to upload non-image payload to R2 (detected header: %x)", preview)
+		return "", fmt.Errorf("refusing to upload non-image or invalid payload to R2 (detected header: %x)", preview)
+	}
+
+	if detectedMime == "image/webp" {
+		sanitized, _, _, err := SanitizeAndValidateWebP(data)
+		if err != nil {
+			return "", fmt.Errorf("refusing to upload invalid/corrupted WebP to R2: %w", err)
+		}
+		data = sanitized
 	}
 
 	if contentType == "" {
