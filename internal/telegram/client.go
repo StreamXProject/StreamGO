@@ -15,8 +15,10 @@ import (
 
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/transport"
 
 	"streamgo/internal/config"
 	"streamgo/internal/logger"
@@ -84,15 +86,30 @@ func New(cfg *config.Config) (*Service, error) {
 		}
 	}
 
+	createOptions := func(sessionPath string, noUpdates bool) telegram.Options {
+		opts := telegram.Options{
+			NoUpdates:        noUpdates,
+			SessionStorage:   &session.FileStorage{Path: sessionPath},
+			MigrationTimeout: 60 * time.Second, // Allow cloud environments ample time for DC migration
+			DialTimeout:      20 * time.Second,
+			ExchangeTimeout:  30 * time.Second,
+			Resolver: dcs.Plain(dcs.PlainOptions{
+				Protocol:   transport.Abridged,
+				Obfuscated: true,
+				Network:    "tcp4", // Force IPv4 to avoid hanging on unroutable IPv6 cloud networks (e.g. Render)
+			}),
+		}
+		if !noUpdates {
+			opts.UpdateHandler = dispatcher
+		}
+		return opts
+	}
+
 	// 1. Create Primary Worker with persistent session storage
 	primaryTokenPrefix := strings.Split(cfg.BotToken, ":")[0]
 	primarySessionPath := filepath.Join(sessionDir, fmt.Sprintf("session_%s.json", primaryTokenPrefix))
 
-	primaryClient := telegram.NewClient(cfg.ApiID, cfg.ApiHash, telegram.Options{
-		NoUpdates:      false,
-		UpdateHandler:  dispatcher,
-		SessionStorage: &session.FileStorage{Path: primarySessionPath},
-	})
+	primaryClient := telegram.NewClient(cfg.ApiID, cfg.ApiHash, createOptions(primarySessionPath, false))
 	svc.primaryWorker = &ClientWorker{
 		Token:               cfg.BotToken,
 		Client:              primaryClient,
@@ -101,7 +118,6 @@ func New(cfg *config.Config) (*Service, error) {
 		channelAccessHashes: make(map[int64]int64),
 	}
 	svc.workers = append(svc.workers, svc.primaryWorker)
-
 
 	// 2. Create Secondary Multi-Client Workers with persistent session storage
 	if cfg.MultiClients {
@@ -113,10 +129,7 @@ func New(cfg *config.Config) (*Service, error) {
 			tokenPrefix := strings.Split(tok, ":")[0]
 			sessionPath := filepath.Join(sessionDir, fmt.Sprintf("session_%s.json", tokenPrefix))
 
-			workerClient := telegram.NewClient(cfg.ApiID, cfg.ApiHash, telegram.Options{
-				NoUpdates:      true, // Secondary download workers don't need update processing
-				SessionStorage: &session.FileStorage{Path: sessionPath},
-			})
+			workerClient := telegram.NewClient(cfg.ApiID, cfg.ApiHash, createOptions(sessionPath, true))
 			worker := &ClientWorker{
 				Token:               tok,
 				Client:              workerClient,
@@ -132,7 +145,7 @@ func New(cfg *config.Config) (*Service, error) {
 	return svc, nil
 }
 
-// Start launches all MTProto client workers concurrently.
+// Start launches all MTProto client workers concurrently with automatic reconnection.
 func (s *Service) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	s.stopCancel = cancel
@@ -143,56 +156,88 @@ func (s *Service) Start(ctx context.Context) error {
 	for _, w := range s.workers {
 		worker := w
 		go func() {
-			err := worker.Client.Run(ctx, func(ctx context.Context) error {
-				// Authenticate
-				authStatus, err := worker.Client.Auth().Status(ctx)
-				if err != nil {
-					log.Warnf("Worker check auth failed: %v", err)
-					return err
+			backoffDelay := 2 * time.Second
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
 				}
 
-				if !authStatus.Authorized && worker.Token != "" {
-					log.Infof("Authorizing client with token (prefix: %s...)", worker.Token[:min(10, len(worker.Token))])
-					if _, err := worker.Client.Auth().Bot(ctx, worker.Token); err != nil {
-						log.Warnf("Worker bot auth failed: %v", err)
+				err := worker.Client.Run(ctx, func(runCtx context.Context) error {
+					// Authenticate
+					authStatus, err := worker.Client.Auth().Status(runCtx)
+					if err != nil {
+						log.Warnf("Worker check auth failed: %v", err)
 						return err
 					}
-					log.Info("Worker authentication successful!")
+
+					if !authStatus.Authorized && worker.Token != "" {
+						log.Infof("Authorizing client with token (prefix: %s...)", worker.Token[:min(10, len(worker.Token))])
+						if _, err := worker.Client.Auth().Bot(runCtx, worker.Token); err != nil {
+							log.Warnf("Worker bot auth failed: %v", err)
+							return err
+						}
+						log.Info("Worker authentication successful!")
+					}
+
+					self, err := worker.Client.Self(runCtx)
+					if err == nil && self != nil {
+						s.mu.Lock()
+						worker.ID = self.ID
+						worker.FirstName = self.FirstName
+						worker.Username = self.Username
+						worker.Bot = self.Bot
+						worker.Ready = true
+						s.mu.Unlock()
+						log.Infof("Connected client: %s (@%s, ID: %d, Bot: %v)", self.FirstName, self.Username, self.ID, self.Bot)
+					}
+
+					// Reset backoff upon successful connection and authorization
+					backoffDelay = 2 * time.Second
+
+					if worker == s.primaryWorker {
+						once.Do(func() {
+							close(readyChan)
+						})
+					}
+
+					<-runCtx.Done()
+					return runCtx.Err()
+				})
+
+				s.mu.Lock()
+				worker.Ready = false
+				s.mu.Unlock()
+
+				if ctx.Err() != nil {
+					return
 				}
 
-				self, err := worker.Client.Self(ctx)
-				if err == nil && self != nil {
-					s.mu.Lock()
-					worker.ID = self.ID
-					worker.FirstName = self.FirstName
-					worker.Username = self.Username
-					worker.Bot = self.Bot
-					worker.Ready = true
-					s.mu.Unlock()
-					log.Infof("Connected client: %s (@%s, ID: %d, Bot: %v)", self.FirstName, self.Username, self.ID, self.Bot)
+				if err != nil {
+					log.Warnf("Telegram worker (token prefix: %s) disconnected: %v. Reconnecting in %v...",
+						worker.Token[:min(10, len(worker.Token))], err, backoffDelay)
 				}
 
-				if worker == s.primaryWorker {
-					once.Do(func() {
-						close(readyChan)
-					})
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoffDelay):
 				}
 
-				<-ctx.Done()
-				return ctx.Err()
-			})
-			if err != nil && ctx.Err() == nil {
-				log.Errorf("Telegram worker (token prefix: %s) failed: %v", worker.Token[:min(10, len(worker.Token))], err)
+				if backoffDelay < 30*time.Second {
+					backoffDelay *= 2
+				}
 			}
 		}()
 	}
 
-	// Wait up to 25 seconds for primary client readiness
+	// Wait up to 45 seconds for primary client readiness
 	select {
 	case <-readyChan:
 		log.Infof("Telegram service active with %d client(s) ready", s.ReadyWorkerCount())
 		return nil
-	case <-time.After(25 * time.Second):
+	case <-time.After(45 * time.Second):
 		log.Warn("Telegram service started with delayed initialization")
 		return nil
 	case <-ctx.Done():
