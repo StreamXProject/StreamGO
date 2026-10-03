@@ -106,6 +106,8 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service, filter *
 
 		// Services
 		trackSvc := services.NewTrackService(trackRepo)
+		r2Storage := services.NewR2StorageService(cfg)
+		trackSvc.SetR2StorageService(r2Storage)
 		alacSvc := services.NewALACService(cfg, tg, "stream_media")
 		streamSvc := services.NewStreamService(trackRepo, tg)
 		streamSvc.SetALACService(alacSvc)
@@ -121,7 +123,7 @@ func New(cfg *config.Config, db *database.Client, tg *telegram.Service, filter *
 		recapSvc := services.NewRecapService(recapRepo, trackRepo)
 
 		// Handlers
-		trackHandler := handlers.NewTrackHandler(trackSvc)
+		trackHandler := handlers.NewTrackHandler(trackSvc, authSvc, cfg)
 		topicHandler := handlers.NewTopicHandler(trackSvc)
 		streamHandler := handlers.NewStreamHandler(streamSvc, authSvc, histSvc)
 		artistHandler := handlers.NewArtistHandler(artistAlbumSvc)

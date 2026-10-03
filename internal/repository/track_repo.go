@@ -29,6 +29,9 @@ type TrackRepository interface {
 	IncrementPlayCount(ctx context.Context, id string) error
 	UpdateWorkerFileID(ctx context.Context, trackID, workerID, fileID string) error
 	UpdateLyricsCache(ctx context.Context, id string, text, kind, source string, telegraphURL string) error
+	SoftDelete(ctx context.Context, id string) error
+	HardDelete(ctx context.Context, id string) error
+	CountArtworkReferences(ctx context.Context, excludeTrackID, coverURL string) (int64, error)
 }
 
 
@@ -469,4 +472,64 @@ func (r *mongoTrackRepository) UpdateLyricsCache(ctx context.Context, id string,
 	}
 	_, err := r.col.UpdateOne(ctx, filter, bson.M{"$set": set})
 	return err
+}
+
+func (r *mongoTrackRepository) SoftDelete(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("track id is required")
+	}
+
+	filter := bson.M{
+		"_id":     id,
+		"deleted": bson.M{"$ne": true},
+	}
+	update := bson.M{
+		"$set": bson.M{
+			"deleted":    true,
+			"deleted_at": float64(time.Now().Unix()),
+			"updated_at": float64(time.Now().Unix()),
+		},
+	}
+	res, err := r.col.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return err
+	}
+	if res.MatchedCount == 0 {
+		return errors.New("track not found")
+	}
+	return nil
+}
+
+func (r *mongoTrackRepository) HardDelete(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("track id is required")
+	}
+
+	res, err := r.col.DeleteOne(ctx, bson.M{"_id": id})
+	if err != nil {
+		return err
+	}
+	if res.DeletedCount == 0 {
+		return errors.New("track not found")
+	}
+	return nil
+}
+
+func (r *mongoTrackRepository) CountArtworkReferences(ctx context.Context, excludeTrackID, coverURL string) (int64, error) {
+	coverURL = strings.TrimSpace(coverURL)
+	if coverURL == "" {
+		return 0, nil
+	}
+
+	filter := bson.M{
+		"_id":     bson.M{"$ne": excludeTrackID},
+		"deleted": bson.M{"$ne": true},
+		"$or": []bson.M{
+			{"spotify.cloudflare_cover_url": coverURL},
+			{"spotify.cloudflare_big_cover_url": coverURL},
+		},
+	}
+	return r.col.CountDocuments(ctx, filter)
 }
