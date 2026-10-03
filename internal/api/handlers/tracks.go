@@ -1,23 +1,32 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"streamgo/internal/api"
+	"streamgo/internal/api/middleware"
+	"streamgo/internal/config"
 	"streamgo/internal/services"
 )
 
 // TrackHandler handles HTTP routes for track operations.
 type TrackHandler struct {
 	trackService *services.TrackService
+	authSvc      *services.AuthService
+	cfg          *config.Config
 }
 
 // NewTrackHandler creates a new TrackHandler.
-func NewTrackHandler(svc *services.TrackService) *TrackHandler {
-	return &TrackHandler{trackService: svc}
+func NewTrackHandler(svc *services.TrackService, authSvc *services.AuthService, cfg *config.Config) *TrackHandler {
+	return &TrackHandler{
+		trackService: svc,
+		authSvc:      authSvc,
+		cfg:          cfg,
+	}
 }
 
 // Routes mounts track endpoints on the given Chi router.
@@ -30,6 +39,13 @@ func (h *TrackHandler) Routes(r chi.Router) {
 	r.Get("/tracks/shuffle", h.Random)
 	r.Get("/library/shuffle", h.Random)
 	r.Get("/tracks/{id}", h.GetByID)
+
+	r.Group(func(sub chi.Router) {
+		if h.authSvc != nil {
+			sub.Use(middleware.RequireAuth(h.authSvc))
+		}
+		sub.Delete("/tracks/{id}", h.Delete)
+	})
 }
 
 // List handles GET /tracks and GET /browse with pagination, sorting, and filters.
@@ -113,5 +129,82 @@ func (h *TrackHandler) Random(w http.ResponseWriter, r *http.Request) {
 	api.RespondJSON(w, http.StatusOK, map[string]interface{}{
 		"total": len(items),
 		"items": items,
+	})
+}
+
+// checkAdmin verifies caller has administrator privileges (consistent with access_control.go).
+func (h *TrackHandler) checkAdmin(r *http.Request) error {
+	if middleware.IsGuest(r.Context()) {
+		return nil
+	}
+
+	userID, ok := middleware.GetUserID(r.Context())
+	if !ok || userID <= 0 {
+		return fmt.Errorf("authentication required")
+	}
+
+	if h.cfg == nil || (len(h.cfg.OwnerIDs) == 0 && len(h.cfg.SudoUsers) == 0) {
+		return nil
+	}
+
+	for _, oid := range h.cfg.OwnerIDs {
+		if oid == userID {
+			return nil
+		}
+	}
+	for _, sid := range h.cfg.SudoUsers {
+		if sid == userID {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("forbidden: administrator privileges required")
+}
+
+// Delete handles DELETE /tracks/{id}.
+func (h *TrackHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	if err := h.checkAdmin(r); err != nil {
+		if strings.Contains(err.Error(), "forbidden") {
+			api.RespondError(w, http.StatusForbidden, err.Error())
+		} else {
+			api.RespondError(w, http.StatusUnauthorized, err.Error())
+		}
+		return
+	}
+
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+	if id == "" {
+		api.RespondError(w, http.StatusBadRequest, "track id is required")
+		return
+	}
+
+	hard := api.ParseQueryBool(r, "hard", false)
+	purgeCache := api.ParseQueryBool(r, "purge_cache", true)
+	purgeArtwork := api.ParseQueryBool(r, "purge_artwork", true)
+
+	opts := services.DeleteTrackOptions{
+		Hard:         hard,
+		PurgeCache:   purgeCache,
+		PurgeArtwork: purgeArtwork,
+	}
+
+	res, err := h.trackService.DeleteTrack(r.Context(), id, opts)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			api.RespondError(w, http.StatusNotFound, "track not found")
+			return
+		}
+		api.RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	api.RespondJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":              true,
+		"status":          http.StatusOK,
+		"track_id":        res.TrackID,
+		"mode":            res.Mode,
+		"cache_purged":    res.CachePurged,
+		"purged_artworks": res.PurgedArtworks,
+		"message":         res.Message,
 	})
 }
