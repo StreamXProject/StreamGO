@@ -2,7 +2,10 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 
 	"streamgo/internal/models"
 	"streamgo/internal/repository"
@@ -10,12 +13,18 @@ import (
 
 // TrackService coordinates track-related business operations.
 type TrackService struct {
-	repo repository.TrackRepository
+	repo      repository.TrackRepository
+	r2Storage *R2StorageService
 }
 
 // NewTrackService creates a new TrackService with the given repository.
 func NewTrackService(repo repository.TrackRepository) *TrackService {
 	return &TrackService{repo: repo}
+}
+
+// SetR2StorageService injects optional R2StorageService for artwork lifecycle management.
+func (s *TrackService) SetR2StorageService(r2 *R2StorageService) {
+	s.r2Storage = r2
 }
 
 // GetTrack retrieves a single track by its ID.
@@ -141,4 +150,90 @@ func (s *TrackService) GetChannelIDs(ctx context.Context) (*models.ChannelIDsRes
 		OK:    true,
 		Items: items,
 	}, nil
+}
+
+// DeleteTrackOptions configures deletion behavior.
+type DeleteTrackOptions struct {
+	Hard         bool
+	PurgeCache   bool
+	PurgeArtwork bool
+}
+
+// DeleteTrackResult summarizes the outcome of track deletion.
+type DeleteTrackResult struct {
+	TrackID        string   `json:"track_id"`
+	Mode           string   `json:"mode"`
+	CachePurged    bool     `json:"cache_purged"`
+	PurgedArtworks []string `json:"purged_artworks,omitempty"`
+	Message        string   `json:"message"`
+}
+
+// DeleteTrack deletes a track (soft by default, or hard) and purges associated transcode cache and orphaned R2 artwork.
+func (s *TrackService) DeleteTrack(ctx context.Context, id string, opts DeleteTrackOptions) (*DeleteTrackResult, error) {
+	track, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("track lookup failed: %w", err)
+	}
+	if track == nil {
+		return nil, fmt.Errorf("track not found")
+	}
+
+	mode := "soft"
+	if opts.Hard {
+		if err := s.repo.HardDelete(ctx, id); err != nil {
+			return nil, fmt.Errorf("failed to hard delete track: %w", err)
+		}
+		mode = "hard"
+	} else {
+		if err := s.repo.SoftDelete(ctx, id); err != nil {
+			return nil, fmt.Errorf("failed to soft delete track: %w", err)
+		}
+	}
+
+	res := &DeleteTrackResult{
+		TrackID: id,
+		Mode:    mode,
+		Message: "Track successfully deleted",
+	}
+
+	// 1. Purge local transcode cache if requested
+	if opts.PurgeCache {
+		cacheFile := filepath.Join("stream_media", "alac_cache", fmt.Sprintf("%s.flac", id))
+		if info, err := os.Stat(cacheFile); err == nil && !info.IsDir() {
+			if rmErr := os.Remove(cacheFile); rmErr == nil {
+				res.CachePurged = true
+			}
+		}
+	}
+
+	// 2. Safely purge orphaned artwork from Cloudflare R2 if requested and R2 is configured
+	if opts.PurgeArtwork && s.r2Storage != nil && s.r2Storage.IsConfigured() {
+		var candidates []string
+		cfCover := track.Spotify.CloudflareCoverURL
+		if cfCover == "" {
+			cfCover = track.CloudflareCoverURL
+		}
+		if cfCover != "" {
+			candidates = append(candidates, cfCover)
+		}
+
+		cfBigCover := track.Spotify.CloudflareBigCoverURL
+		if cfBigCover == "" {
+			cfBigCover = track.CloudflareBigCoverURL
+		}
+		if cfBigCover != "" && cfBigCover != cfCover {
+			candidates = append(candidates, cfBigCover)
+		}
+
+		for _, coverURL := range candidates {
+			refs, countErr := s.repo.CountArtworkReferences(ctx, id, coverURL)
+			if countErr == nil && refs == 0 {
+				if delErr := s.r2Storage.DeleteCoverByURL(ctx, coverURL); delErr == nil {
+					res.PurgedArtworks = append(res.PurgedArtworks, coverURL)
+				}
+			}
+		}
+	}
+
+	return res, nil
 }

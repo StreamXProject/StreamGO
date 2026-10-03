@@ -235,6 +235,18 @@ func (m *mockTrackRepo) UpdateLyricsCache(ctx context.Context, id string, text, 
 	return nil
 }
 
+func (m *mockTrackRepo) SoftDelete(ctx context.Context, id string) error {
+	return nil
+}
+
+func (m *mockTrackRepo) HardDelete(ctx context.Context, id string) error {
+	return nil
+}
+
+func (m *mockTrackRepo) CountArtworkReferences(ctx context.Context, excludeTrackID, coverURL string) (int64, error) {
+	return 0, nil
+}
+
 func TestFavouritePlaylistService(t *testing.T) {
 	ctx := context.Background()
 	favRepo := newMockFavRepo()

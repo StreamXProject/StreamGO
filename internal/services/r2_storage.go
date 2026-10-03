@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -276,6 +277,23 @@ func (s *R2StorageService) DeleteCover(ctx context.Context, key string) error {
 
 	logR2.Infof("Successfully deleted artwork from R2: %s", key)
 	return nil
+}
+
+// DeleteCoverByURL parses the R2 key from a public CDN URL and removes the object.
+// Returns nil if R2 is not configured or if URL is empty.
+func (s *R2StorageService) DeleteCoverByURL(ctx context.Context, rawURL string) error {
+	if s == nil || !s.IsConfigured() || strings.TrimSpace(rawURL) == "" {
+		return nil
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid cover url: %w", err)
+	}
+	key := strings.TrimPrefix(parsed.Path, "/")
+	if key == "" {
+		return nil
+	}
+	return s.DeleteCover(ctx, key)
 }
 
 // signS3Request signs an HTTP request using AWS Signature Version 4 (SigV4).

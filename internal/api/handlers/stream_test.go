@@ -51,6 +51,15 @@ func (m *mockStreamTrackRepo) UpdateWorkerFileID(ctx context.Context, trackID, w
 func (m *mockStreamTrackRepo) UpdateLyricsCache(ctx context.Context, id string, text, kind, source string, telegraphURL string) error {
 	return nil
 }
+func (m *mockStreamTrackRepo) SoftDelete(ctx context.Context, id string) error {
+	return nil
+}
+func (m *mockStreamTrackRepo) HardDelete(ctx context.Context, id string) error {
+	return nil
+}
+func (m *mockStreamTrackRepo) CountArtworkReferences(ctx context.Context, excludeTrackID, coverURL string) (int64, error) {
+	return 0, nil
+}
 
 type mockHistRepoForStream struct {
 	mu    sync.Mutex
