@@ -305,6 +305,7 @@ func (h *Handler) handleAdminCallback(ctx context.Context, e tg.Entities, update
 			Message: fmt.Sprintf("Send the user ID to %s.", action),
 		})
 		page := h.getLastPage(update.UserID)
+		inputPeer := extractInputPeer(update.Peer, e, w)
 		h.setEditState(update.UserID, &AdminEditState{
 			Key:       key,
 			MsgID:     update.MsgID,
@@ -312,6 +313,7 @@ func (h *Handler) handleAdminCallback(ctx context.Context, e tg.Entities, update
 			EditMode:  true,
 			Action:    action,
 			Peer:      update.Peer,
+			InputPeer: inputPeer,
 			UpdatedAt: time.Now(),
 		})
 		kb := markup.InlineKeyboard(
@@ -389,12 +391,14 @@ func (h *Handler) handleAdminCallback(ctx context.Context, e tg.Entities, update
 		key := strings.TrimPrefix(data, "edit_")
 		_, _ = w.API.MessagesSetBotCallbackAnswer(ctx, &tg.MessagesSetBotCallbackAnswerRequest{QueryID: update.QueryID})
 		page := h.getLastPage(update.UserID)
+		inputPeer := extractInputPeer(update.Peer, e, w)
 		h.setEditState(update.UserID, &AdminEditState{
 			Key:       key,
 			MsgID:     update.MsgID,
 			Page:      page,
 			EditMode:  true,
 			Peer:      update.Peer,
+			InputPeer: inputPeer,
 			UpdatedAt: time.Now(),
 		})
 
@@ -650,7 +654,11 @@ func (h *Handler) handleAdminTextInput(ctx context.Context, e tg.Entities, upd m
 		}
 
 		kb := h.getSettingsKeyboard(state.Page, true)
-		_ = h.editMessage(ctx, state.Peer, e, state.MsgID, fmt.Sprintf("Config Variables | Page: %d | State: edit", state.Page), kb)
+		if state.InputPeer != nil {
+			_ = h.editMessageWithInputPeer(ctx, state.InputPeer, state.MsgID, fmt.Sprintf("Config Variables | Page: %d | State: edit", state.Page), kb)
+		} else {
+			_ = h.editMessage(ctx, state.Peer, e, state.MsgID, fmt.Sprintf("Config Variables | Page: %d | State: edit", state.Page), kb)
+		}
 		h.clearEditState(senderID)
 		return
 	}
@@ -665,7 +673,11 @@ func (h *Handler) handleAdminTextInput(ctx context.Context, e tg.Entities, upd m
 				markup.Callback("Close", []byte("close_settings")),
 			),
 		)
-		_ = h.editMessage(ctx, state.Peer, e, state.MsgID, fmt.Sprintf("ㄨ Error updating setting: %s", html.EscapeString(err.Error())), kb)
+		if state.InputPeer != nil {
+			_ = h.editMessageWithInputPeer(ctx, state.InputPeer, state.MsgID, fmt.Sprintf("ㄨ Error updating setting: %s", html.EscapeString(err.Error())), kb)
+		} else {
+			_ = h.editMessage(ctx, state.Peer, e, state.MsgID, fmt.Sprintf("ㄨ Error updating setting: %s", html.EscapeString(err.Error())), kb)
+		}
 		h.clearEditState(senderID)
 		return
 	}
@@ -690,7 +702,11 @@ func (h *Handler) handleAdminTextInput(ctx context.Context, e tg.Entities, upd m
 
 	panelText := fmt.Sprintf("Config Variables | Page: %d | State: %s\n\n%s", state.Page, stateStr, feedback)
 	kb := h.getSettingsKeyboard(state.Page, state.EditMode)
-	_ = h.editMessage(ctx, state.Peer, e, state.MsgID, panelText, kb)
+	if state.InputPeer != nil {
+		_ = h.editMessageWithInputPeer(ctx, state.InputPeer, state.MsgID, panelText, kb)
+	} else {
+		_ = h.editMessage(ctx, state.Peer, e, state.MsgID, panelText, kb)
+	}
 	h.clearEditState(senderID)
 }
 

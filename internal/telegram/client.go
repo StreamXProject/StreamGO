@@ -42,6 +42,8 @@ type ClientWorker struct {
 	Ready               bool
 	channelAccessHashes map[int64]int64
 	channelAccessMu     sync.RWMutex
+	userAccessHashes    map[int64]int64
+	userAccessMu        sync.RWMutex
 }
 
 // Service manages a pool of concurrent MTProto Telegram bot clients.
@@ -117,6 +119,7 @@ func New(cfg *config.Config) (*Service, error) {
 		API:                 primaryClient.API(),
 		Downloader:          downloader.NewDownloader(),
 		channelAccessHashes: make(map[int64]int64),
+		userAccessHashes:    make(map[int64]int64),
 	}
 	svc.workers = append(svc.workers, svc.primaryWorker)
 
@@ -137,6 +140,7 @@ func New(cfg *config.Config) (*Service, error) {
 				API:                 workerClient.API(),
 				Downloader:          downloader.NewDownloader(),
 				channelAccessHashes: make(map[int64]int64),
+				userAccessHashes:    make(map[int64]int64),
 			}
 			svc.workers = append(svc.workers, worker)
 			log.Infof("Registered multi-client worker #%d", i+1)
@@ -481,6 +485,24 @@ func (w *ClientWorker) setChannelAccessHash(channelID, accessHash int64) {
 		w.channelAccessHashes = make(map[int64]int64)
 	}
 	w.channelAccessHashes[channelID] = accessHash
+}
+
+func (w *ClientWorker) GetUserAccessHash(userID int64) int64 {
+	w.userAccessMu.RLock()
+	defer w.userAccessMu.RUnlock()
+	if w.userAccessHashes == nil {
+		return 0
+	}
+	return w.userAccessHashes[userID]
+}
+
+func (w *ClientWorker) SetUserAccessHash(userID, accessHash int64) {
+	w.userAccessMu.Lock()
+	defer w.userAccessMu.Unlock()
+	if w.userAccessHashes == nil {
+		w.userAccessHashes = make(map[int64]int64)
+	}
+	w.userAccessHashes[userID] = accessHash
 }
 
 func extractMessagesList(msgs tg.MessagesMessagesClass) []tg.MessageClass {

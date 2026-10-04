@@ -15,9 +15,12 @@ import (
 
 	"streamgo/internal/config"
 	"streamgo/internal/database"
+	"streamgo/internal/logger"
 	"streamgo/internal/models"
 	"streamgo/internal/telegram"
 )
+
+var log = logger.New("telegramcmd")
 
 // AuthHelper defines authentication methods required by bot commands.
 type AuthHelper interface {
@@ -65,6 +68,7 @@ type AdminEditState struct {
 	EditMode  bool
 	Action    string // "add", "remove", or ""
 	Peer      tg.PeerClass
+	InputPeer tg.InputPeerClass
 	UpdatedAt time.Time
 }
 
@@ -450,6 +454,18 @@ func (h *Handler) editMessage(ctx context.Context, peer tg.PeerClass, e tg.Entit
 		return errors.New("could not resolve input peer")
 	}
 
+	return h.editMessageWithInputPeer(ctx, inputPeer, msgID, htmlContent, replyMarkup)
+}
+
+func (h *Handler) editMessageWithInputPeer(ctx context.Context, inputPeer tg.InputPeerClass, msgID int, htmlContent string, replyMarkup tg.ReplyMarkupClass) error {
+	w := h.tgService.PrimaryWorker()
+	if w == nil || w.API == nil {
+		return errors.New("no ready Telegram worker")
+	}
+	if inputPeer == nil {
+		return errors.New("input peer is nil")
+	}
+
 	text, entities := parseHTML(htmlContent)
 	req := &tg.MessagesEditMessageRequest{
 		Peer:        inputPeer,
@@ -461,6 +477,9 @@ func (h *Handler) editMessage(ctx context.Context, peer tg.PeerClass, e tg.Entit
 	}
 
 	_, err := w.API.MessagesEditMessage(ctx, req)
+	if err != nil {
+		log.Warnf("MessagesEditMessage failed (peer: %v, msgID: %d): %v", inputPeer, msgID, err)
+	}
 	return err
 }
 
@@ -471,9 +490,16 @@ func extractInputPeer(p tg.PeerClass, e tg.Entities, w *telegram.ClientWorker) t
 	switch peer := p.(type) {
 	case *tg.PeerUser:
 		if u, ok := e.Users[peer.UserID]; ok {
+			if w != nil {
+				w.SetUserAccessHash(peer.UserID, u.AccessHash)
+			}
 			return u.AsInputPeer()
 		}
-		return &tg.InputPeerUser{UserID: peer.UserID}
+		accessHash := int64(0)
+		if w != nil {
+			accessHash = w.GetUserAccessHash(peer.UserID)
+		}
+		return &tg.InputPeerUser{UserID: peer.UserID, AccessHash: accessHash}
 	case *tg.PeerChat:
 		if c, ok := e.Chats[peer.ChatID]; ok {
 			return c.AsInputPeer()
