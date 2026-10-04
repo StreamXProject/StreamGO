@@ -2007,3 +2007,100 @@ func (s *AuthService) ClearAuthCookie(w http.ResponseWriter) {
 func (s *AuthService) GetUserByID(ctx context.Context, id int64) (*models.User, error) {
 	return s.userRepo.GetUserByID(ctx, id)
 }
+
+// AuthenticateOrRegisterTgUser finds or creates a user by Telegram user ID and generates an auth token.
+func (s *AuthService) AuthenticateOrRegisterTgUser(ctx context.Context, tgUserID int64, name, username, photoURL, inviteCode string) (*models.User, string, error) {
+	now := float64(time.Now().Unix())
+	user, err := s.userRepo.GetUserByID(ctx, tgUserID)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if user == nil {
+		if s.accessRepo != nil {
+			policy, pErr := s.accessRepo.GetPolicy(ctx)
+			if pErr == nil && policy != nil {
+				switch strings.ToLower(policy.RegistrationMode) {
+				case "closed":
+					return nil, "", errors.New("registration is currently closed")
+				case "invite":
+					if inviteCode == "" {
+						return nil, "", errors.New("an invite code is required to register")
+					}
+					inv, iErr := s.accessRepo.GetInvite(ctx, strings.ToUpper(strings.TrimSpace(inviteCode)))
+					if iErr != nil || inv == nil || inv.Revoked {
+						return nil, "", errors.New("invalid or revoked invite code")
+					}
+					if inv.ExpiresAt != nil && now > *inv.ExpiresAt {
+						return nil, "", errors.New("invite code has expired")
+					}
+					if inv.MaxUses > 0 && inv.UsedCount >= inv.MaxUses {
+						return nil, "", errors.New("invite code has reached maximum uses")
+					}
+					_ = s.accessRepo.ConsumeInvite(ctx, inv.Code)
+				case "allowlist":
+					if !s.accessRepo.IsInAllowlist(ctx, tgUserID) {
+						return nil, "", errors.New("your account is not on the registration allowlist")
+					}
+				}
+			}
+		}
+
+		user = &models.User{
+			ID:           tgUserID,
+			UserID:       tgUserID,
+			FirstName:    name,
+			Username:     CanonUsername(username),
+			PhotoURL:     photoURL,
+			ProfileURL:   photoURL,
+			Status:       "active",
+			TokenVersion: 0,
+			Telegram: &models.TelegramInfo{
+				ID:       tgUserID,
+				Username: username,
+			},
+			RegisteredVia: map[string]any{
+				"mode":        "telegram_bot",
+				"invite_code": inviteCode,
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+	} else {
+		if user.Status == "locked" {
+			return nil, "", errors.New("your account has been suspended")
+		}
+		if name != "" {
+			user.FirstName = name
+		}
+		if username != "" && user.Username == "" {
+			user.Username = CanonUsername(username)
+		}
+		if photoURL != "" {
+			user.PhotoURL = photoURL
+			user.ProfileURL = photoURL
+		}
+		if user.Telegram == nil {
+			user.Telegram = &models.TelegramInfo{ID: tgUserID, Username: username}
+		}
+		user.UpdatedAt = now
+	}
+
+	savedUser, err := s.userRepo.UpsertUser(ctx, user)
+	if err != nil {
+		return nil, "", err
+	}
+
+	token, err := s.CreateToken(savedUser)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return savedUser, token, nil
+}
+
+// ConfirmBotSession marks a bot auth session confirmed in the repository.
+func (s *AuthService) ConfirmBotSession(ctx context.Context, sessionID, token string, user *models.User) error {
+	return s.userRepo.ConfirmBotAuthSession(ctx, sessionID, token, user)
+}
+

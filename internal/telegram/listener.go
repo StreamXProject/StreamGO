@@ -69,20 +69,21 @@ func (l *IngestionListener) SetTelegramService(svc *Service) {
 func (l *IngestionListener) SetupDispatcher(d *tg.UpdateDispatcher) {
 	d.OnNewChannelMessage(func(ctx context.Context, e tg.Entities, u *tg.UpdateNewChannelMessage) error {
 		if msg, ok := u.Message.(*tg.Message); ok {
-			l.handleMessage(ctx, msg)
+			l.HandleMessage(ctx, msg)
 		}
 		return nil
 	})
 
 	d.OnNewMessage(func(ctx context.Context, e tg.Entities, u *tg.UpdateNewMessage) error {
 		if msg, ok := u.Message.(*tg.Message); ok {
-			l.handleMessage(ctx, msg)
+			l.HandleMessage(ctx, msg)
 		}
 		return nil
 	})
 }
 
-func (l *IngestionListener) handleMessage(ctx context.Context, msg *tg.Message) {
+// HandleMessage inspects incoming Telegram messages and indexes audio media.
+func (l *IngestionListener) HandleMessage(ctx context.Context, msg *tg.Message) {
 	if msg == nil || msg.Media == nil {
 		return
 	}

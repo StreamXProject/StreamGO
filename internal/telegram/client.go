@@ -461,13 +461,17 @@ func normalizeToChannelID(chatID int64) (int64, bool) {
 	return chatID, false
 }
 
-func (w *ClientWorker) getChannelAccessHash(channelID int64) int64 {
+func (w *ClientWorker) GetChannelAccessHash(channelID int64) int64 {
 	w.channelAccessMu.RLock()
 	defer w.channelAccessMu.RUnlock()
 	if w.channelAccessHashes == nil {
 		return 0
 	}
 	return w.channelAccessHashes[channelID]
+}
+
+func (w *ClientWorker) getChannelAccessHash(channelID int64) int64 {
+	return w.GetChannelAccessHash(channelID)
 }
 
 func (w *ClientWorker) setChannelAccessHash(channelID, accessHash int64) {

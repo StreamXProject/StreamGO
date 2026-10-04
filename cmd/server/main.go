@@ -13,9 +13,11 @@ import (
 	"streamgo/internal/config"
 	"streamgo/internal/database"
 	"streamgo/internal/logger"
+	"streamgo/internal/repository"
 	"streamgo/internal/server"
 	"streamgo/internal/services"
 	"streamgo/internal/telegram"
+	telegramcmd "streamgo/internal/telegram/cmd"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -98,7 +100,23 @@ func main() {
 			enrichSvc.SetDownloader(tgService)
 			listener := telegram.NewIngestionListener(cfg, dbClient, accessFilter, dedupSvc, enrichSvc.TriggerEnrich)
 			listener.SetTelegramService(tgService)
-			listener.SetupDispatcher(&tgService.Dispatcher)
+
+			var authSvc *services.AuthService
+			var accessSvc *services.AccessControlService
+			var trackSvc *services.TrackService
+
+			if dbClient != nil {
+				userRepo := repository.NewUserRepository(dbClient)
+				accessRepo := repository.NewAccessControlRepository(dbClient)
+				trackRepo := repository.NewTrackRepository(dbClient)
+				authSvc = services.NewAuthService(cfg, userRepo)
+				authSvc.SetAccessControlRepository(accessRepo)
+				accessSvc = services.NewAccessControlService(accessRepo)
+				trackSvc = services.NewTrackService(trackRepo)
+			}
+
+			cmdHandler := telegramcmd.New(cfg, dbClient, tgService, listener, authSvc, accessSvc, accessFilter, trackSvc)
+			cmdHandler.SetupDispatcher(&tgService.Dispatcher)
 
 			log.Info("Starting Telegram MTProto multi-client pool in background...")
 			go func() {

@@ -9,6 +9,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"streamgo/internal/config"
 	"streamgo/internal/database"
@@ -221,3 +222,123 @@ func (f *AccessFilter) IsChatAllowed(ctx context.Context, chatID int64) bool {
 
 	return allowed
 }
+
+// SetMode updates the active ingestion filter mode.
+func (f *AccessFilter) SetMode(mode int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mode = mode
+	if f.cfg != nil {
+		f.cfg.FilterMode = mode
+	}
+}
+
+// GetMode returns the current active filter mode.
+func (f *AccessFilter) GetMode() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.mode
+}
+
+// GetStats returns summary statistics of current filtering policy.
+func (f *AccessFilter) GetStats() (mode int, modeName string, allowedCount int, bannedCount int, channelID int64) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	mode = f.mode
+	modeName = FilterModeToString(f.mode)
+	allowedCount = len(f.allowedChats)
+	bannedCount = len(f.bannedChats)
+	if f.cfg != nil {
+		channelID = f.cfg.ChannelID
+	}
+	return
+}
+
+// AllowChat adds a chat or user ID to allowed contributors.
+func (f *AccessFilter) AllowChat(ctx context.Context, chatID int64) error {
+	if f.col != nil {
+		opts := options.UpdateOne().SetUpsert(true)
+		_, err := f.col.UpdateOne(ctx, bson.M{"_id": chatID}, bson.M{
+			"$set": bson.M{
+				"_id":        chatID,
+				"chat_id":    chatID,
+				"updated_at": float64(time.Now().Unix()),
+			},
+		}, opts)
+		if err != nil {
+			return err
+		}
+	}
+	if f.bannedCol != nil {
+		_, _ = f.bannedCol.DeleteOne(ctx, bson.M{
+			"$or": []bson.M{
+				{"_id": chatID},
+				{"chat_id": chatID},
+				{"user_id": chatID},
+			},
+		})
+	}
+	return f.RefreshCache(ctx)
+}
+
+// DisallowChat removes a chat or user ID from allowed contributors.
+func (f *AccessFilter) DisallowChat(ctx context.Context, chatID int64) error {
+	if f.col != nil {
+		_, err := f.col.DeleteOne(ctx, bson.M{
+			"$or": []bson.M{
+				{"_id": chatID},
+				{"chat_id": chatID},
+			},
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return f.RefreshCache(ctx)
+}
+
+// BanChat adds a chat or user ID to banned sources.
+func (f *AccessFilter) BanChat(ctx context.Context, id int64, reason string) error {
+	if f.bannedCol != nil {
+		opts := options.UpdateOne().SetUpsert(true)
+		_, err := f.bannedCol.UpdateOne(ctx, bson.M{"_id": id}, bson.M{
+			"$set": bson.M{
+				"_id":        id,
+				"chat_id":    id,
+				"user_id":    id,
+				"reason":     reason,
+				"updated_at": float64(time.Now().Unix()),
+			},
+		}, opts)
+		if err != nil {
+			return err
+		}
+	}
+	if f.col != nil {
+		_, _ = f.col.DeleteOne(ctx, bson.M{
+			"$or": []bson.M{
+				{"_id": id},
+				{"chat_id": id},
+			},
+		})
+	}
+	return f.RefreshCache(ctx)
+}
+
+// UnbanChat removes a chat or user ID from banned sources.
+func (f *AccessFilter) UnbanChat(ctx context.Context, id int64) error {
+	if f.bannedCol != nil {
+		_, err := f.bannedCol.DeleteOne(ctx, bson.M{
+			"$or": []bson.M{
+				{"_id": id},
+				{"chat_id": id},
+				{"user_id": id},
+			},
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return f.RefreshCache(ctx)
+}
+

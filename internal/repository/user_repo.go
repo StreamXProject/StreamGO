@@ -36,6 +36,7 @@ type UserRepository interface {
 	UpdateFCMToken(ctx context.Context, userID int64, fcmToken string) error
 	SaveBotAuthSession(ctx context.Context, session *models.BotAuthSession) error
 	GetBotAuthSession(ctx context.Context, sessionID string) (*models.BotAuthSession, error)
+	ConfirmBotAuthSession(ctx context.Context, sessionID, token string, user *models.User) error
 }
 
 type mongoUserRepository struct {
@@ -328,4 +329,25 @@ func (r *mongoUserRepository) GetBotAuthSession(ctx context.Context, sessionID s
 	}
 	return &s, nil
 }
+
+// ConfirmBotAuthSession marks a temporary bot auth session as confirmed with token and user details.
+func (r *mongoUserRepository) ConfirmBotAuthSession(ctx context.Context, sessionID, token string, user *models.User) error {
+	now := float64(time.Now().Unix())
+	filter := bson.M{"_id": sessionID}
+	update := bson.M{
+		"$set": bson.M{
+			"status":       "confirmed",
+			"token":        token,
+			"user_id":      user.ID,
+			"first_name":   user.FirstName,
+			"username":     user.Username,
+			"photo_url":    user.PhotoURL,
+			"profile_url":  user.ProfileURL,
+			"confirmed_at": now,
+		},
+	}
+	_, err := r.botAuthSessionsCol.UpdateOne(ctx, filter, update)
+	return err
+}
+
 
