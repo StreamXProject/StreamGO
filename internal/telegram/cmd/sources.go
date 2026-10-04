@@ -12,9 +12,13 @@ import (
 )
 
 // handleSources displays the current source filtering status.
-func (h *Handler) handleSources(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message) {
+func (h *Handler) handleSources(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64) {
+	if !h.isAdmin(senderID) {
+		return
+	}
+
 	if h.accessFilter == nil {
-		_ = h.replyHTML(ctx, e, upd, "⚠️ Source filter service not active.", nil)
+		_ = h.replyHTML(ctx, e, upd, "Source filter service not active.", nil)
 		return
 	}
 
@@ -34,7 +38,6 @@ func (h *Handler) handleSources(ctx context.Context, e tg.Entities, upd message.
 // handleFilterMode views or updates the live ingestion filter mode.
 func (h *Handler) handleFilterMode(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -61,7 +64,6 @@ func (h *Handler) handleFilterMode(ctx context.Context, e tg.Entities, upd messa
 // handleAllow adds a channel, group, or user to allowed contributors.
 func (h *Handler) handleAllow(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -103,7 +105,6 @@ func (h *Handler) handleAllow(ctx context.Context, e tg.Entities, upd message.An
 // handleDisallow removes a channel, group, or user from allowed contributors.
 func (h *Handler) handleDisallow(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -140,7 +141,6 @@ func (h *Handler) handleDisallow(ctx context.Context, e tg.Entities, upd message
 // handleBan blocks a channel, group, or user from contributing tracks.
 func (h *Handler) handleBan(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -184,7 +184,6 @@ func (h *Handler) handleBan(ctx context.Context, e tg.Entities, upd message.Answ
 // handleUnban unbans a channel, group, or user.
 func (h *Handler) handleUnban(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 

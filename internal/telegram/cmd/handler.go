@@ -179,7 +179,7 @@ func (h *Handler) routeMessage(ctx context.Context, e tg.Entities, upd message.A
 	case "mediainfo", "mi":
 		h.handleMediaInfo(ctx, e, upd, msg)
 	case "sources":
-		h.handleSources(ctx, e, upd, msg)
+		h.handleSources(ctx, e, upd, msg, senderID)
 	case "filter_mode", "filtermode":
 		h.handleFilterMode(ctx, e, upd, msg, senderID, args)
 	case "allow", "allow_source", "allowsource":

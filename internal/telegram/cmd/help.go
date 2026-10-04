@@ -21,7 +21,7 @@ func (h *Handler) handleStartOrHelp(ctx context.Context, e tg.Entities, upd mess
 	if len(args) > 0 && (strings.HasPrefix(args[0], "auth_") || strings.HasPrefix(args[0], "login_")) {
 		sessionID := strings.TrimSpace(args[0])
 		if h.db == nil || h.authSvc == nil {
-			_ = h.replyHTML(ctx, e, upd, "⚠️ <b>Database or Auth service not available.</b>", nil)
+			_ = h.replyHTML(ctx, e, upd, "<b>Database or Auth service not available.</b>", nil)
 			return
 		}
 
@@ -44,7 +44,7 @@ func (h *Handler) handleStartOrHelp(ctx context.Context, e tg.Entities, upd mess
 
 		user, token, err := h.authSvc.AuthenticateOrRegisterTgUser(ctx, senderID, senderName, senderUsername, "", session.InviteCode)
 		if err != nil {
-			_ = h.replyHTML(ctx, e, upd, fmt.Sprintf("⚠️ <b>Authorization failed:</b> %s", html.EscapeString(err.Error())), nil)
+			_ = h.replyHTML(ctx, e, upd, fmt.Sprintf("<b>Authorization failed:</b> %s", html.EscapeString(err.Error())), nil)
 			return
 		}
 
@@ -53,7 +53,7 @@ func (h *Handler) handleStartOrHelp(ctx context.Context, e tg.Entities, upd mess
 		if welcomeName == "" {
 			welcomeName = "User"
 		}
-		_ = h.replyHTML(ctx, e, upd, fmt.Sprintf("🎉 <b>Authorized Successfully WebX!</b>\n\nWelcome, <b>%s</b>! Your browser session is ready.\nYou can now return to your browser and enjoy your music!", html.EscapeString(welcomeName)), nil)
+		_ = h.replyHTML(ctx, e, upd, fmt.Sprintf("<b>Authorized Successfully WebX!</b>\n\nWelcome, <b>%s</b>! Your browser session is ready.\nYou can now return to your browser and enjoy your music!", html.EscapeString(welcomeName)), nil)
 		return
 	}
 

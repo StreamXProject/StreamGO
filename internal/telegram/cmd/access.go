@@ -18,12 +18,11 @@ import (
 // handleAccess displays current registration mode, required channels, and user counts.
 func (h *Handler) handleAccess(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
 	if h.accessCtrl == nil {
-		_ = h.replyHTML(ctx, e, upd, "⚠️ Access control service not initialized.", nil)
+		_ = h.replyHTML(ctx, e, upd, "Access control service not initialized.", nil)
 		return
 	}
 
@@ -82,7 +81,6 @@ func (h *Handler) handleAccess(ctx context.Context, e tg.Entities, upd message.A
 // handleRegistration updates the registration mode (open, invite, allowlist, closed).
 func (h *Handler) handleRegistration(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -117,7 +115,6 @@ func (h *Handler) handleRegistration(ctx context.Context, e tg.Entities, upd mes
 // handleMembership toggles channel membership check enforcement.
 func (h *Handler) handleMembership(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -143,7 +140,6 @@ func (h *Handler) handleMembership(ctx context.Context, e tg.Entities, upd messa
 // handleRequireChat adds a channel that users must join before using the service.
 func (h *Handler) handleRequireChat(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -210,7 +206,6 @@ func (h *Handler) handleRequireChat(ctx context.Context, e tg.Entities, upd mess
 // handleUnrequireChat removes a required channel.
 func (h *Handler) handleUnrequireChat(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -239,7 +234,6 @@ func (h *Handler) handleUnrequireChat(ctx context.Context, e tg.Entities, upd me
 // handleInvite generates a new registration invite code.
 func (h *Handler) handleInvite(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -282,7 +276,6 @@ func (h *Handler) handleInvite(ctx context.Context, e tg.Entities, upd message.A
 // handleInvites lists currently active invite codes.
 func (h *Handler) handleInvites(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -319,7 +312,6 @@ func (h *Handler) handleInvites(ctx context.Context, e tg.Entities, upd message.
 // handleLock blocks a user from using the service and revokes active sessions.
 func (h *Handler) handleLock(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -359,7 +351,6 @@ func (h *Handler) handleLock(ctx context.Context, e tg.Entities, upd message.Ans
 // handleUnlock unblocks a user.
 func (h *Handler) handleUnlock(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -385,7 +376,6 @@ func (h *Handler) handleUnlock(ctx context.Context, e tg.Entities, upd message.A
 // handleRevoke invalidates all active sessions for a user.
 func (h *Handler) handleRevoke(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -411,7 +401,6 @@ func (h *Handler) handleRevoke(ctx context.Context, e tg.Entities, upd message.A
 // handleBypass exempts a user from required channel checks or toggles enforcement.
 func (h *Handler) handleBypass(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -475,7 +464,6 @@ func (h *Handler) handleBypass(ctx context.Context, e tg.Entities, upd message.A
 // handleUnbypass removes a user from required channel check bypass.
 func (h *Handler) handleUnbypass(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64, args []string) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 
@@ -510,7 +498,6 @@ func (h *Handler) handleUnbypass(ctx context.Context, e tg.Entities, upd message
 // handleBypasses lists all users exempted from channel checks.
 func (h *Handler) handleBypasses(ctx context.Context, e tg.Entities, upd message.AnswerableMessageUpdate, msg *tg.Message, senderID int64) {
 	if !h.isAdmin(senderID) {
-		_ = h.replyHTML(ctx, e, upd, "⛔ Access denied. Admin privileges required.", nil)
 		return
 	}
 

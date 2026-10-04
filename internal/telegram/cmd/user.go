@@ -88,7 +88,7 @@ func (h *Handler) handleSearch(ctx context.Context, e tg.Entities, upd message.A
 
 	query := strings.Join(args, " ")
 	if h.trackSvc == nil {
-		_ = h.replyHTML(ctx, e, upd, "⚠️ Track search service unavailable.", nil)
+		_ = h.replyHTML(ctx, e, upd, "Track search service unavailable.", nil)
 		return
 	}
 
@@ -112,7 +112,7 @@ func (h *Handler) handleSearch(ctx context.Context, e tg.Entities, upd message.A
 			sb.WriteString(fmt.Sprintf("💿 %s\n", album))
 		}
 		durStr := formatSeconds(item.DurationSec)
-		sb.WriteString(fmt.Sprintf("⏱ %s · <code>%s</code>\n", durStr, item.ID))
+		sb.WriteString(fmt.Sprintf("%s · <code>%s</code>\n", durStr, item.ID))
 
 		if i < len(results)-1 {
 			sb.WriteString("\n")
@@ -154,7 +154,7 @@ func (h *Handler) handleMediaInfo(ctx context.Context, e tg.Entities, upd messag
 
 	sizeMB := float64(targetDoc.Size) / (1024 * 1024)
 	var sb strings.Builder
-	sb.WriteString("🔊 <b>Media Information:</b>\n\n")
+	sb.WriteString("<b>Media Information:</b>\n\n")
 	if title != "" {
 		sb.WriteString(fmt.Sprintf("• <b>Title:</b> %s\n", html.EscapeString(title)))
 	}
