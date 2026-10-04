@@ -78,6 +78,10 @@ func (h *Handler) handleCallbackQuery(ctx context.Context, e tg.Entities, update
 		return
 	}
 
+	if h.handleAdminCallback(ctx, e, update) {
+		return
+	}
+
 	// Always answer the query to dismiss button loading spinner
 	_, _ = w.API.MessagesSetBotCallbackAnswer(ctx, &tg.MessagesSetBotCallbackAnswerRequest{
 		QueryID: update.QueryID,

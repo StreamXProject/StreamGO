@@ -58,6 +58,9 @@ func (h *Handler) handleFilterMode(ctx context.Context, e tg.Entities, upd messa
 
 	newMode := parseFilterMode(args[0])
 	h.accessFilter.SetMode(newMode)
+	if h.cfgMgr != nil {
+		_, _ = h.cfgMgr.UpdateConfig(ctx, "FILTER_MODE", newMode)
+	}
 	_ = h.replyHTML(ctx, e, upd, fmt.Sprintf("ꪜ Filter mode updated to <code>%d</code> (<code>%s</code>).", newMode, filterModeToString(newMode)), nil)
 }
 

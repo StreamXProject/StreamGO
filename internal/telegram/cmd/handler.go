@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gotd/td/telegram/message"
@@ -56,9 +57,28 @@ type TrackSearchHelper interface {
 	Search(ctx context.Context, query string, limit int) ([]*models.BrowseItem, error)
 }
 
+// AdminEditState tracks in-flight interactive setting modifications.
+type AdminEditState struct {
+	Key       string
+	MsgID     int
+	Page      int
+	EditMode  bool
+	Action    string // "add", "remove", or ""
+	Peer      tg.PeerClass
+	UpdatedAt time.Time
+}
+
+// CookieWaitState tracks admins who clicked the Cookies button and are expected to upload a .txt file.
+type CookieWaitState struct {
+	MsgID     int
+	Peer      tg.PeerClass
+	UpdatedAt time.Time
+}
+
 // Handler coordinates Telegram bot command routing and interactive inline queries.
 type Handler struct {
 	cfg          *config.Config
+	cfgMgr       *config.ConfigManager
 	db           *database.Client
 	tgService    *telegram.Service
 	listener     *telegram.IngestionListener
@@ -67,11 +87,15 @@ type Handler struct {
 	accessFilter AccessFilterHelper
 	trackSvc     TrackSearchHelper
 	startTime    time.Time
+	editMu       sync.Mutex
+	editStates   map[int64]*AdminEditState
+	lastPages    map[int64]int
+	cookieWait   map[int64]*CookieWaitState
 }
 
 // New creates a new command Handler.
 func New(
-	cfg *config.Config,
+	cfgMgr *config.ConfigManager,
 	db *database.Client,
 	tgService *telegram.Service,
 	listener *telegram.IngestionListener,
@@ -80,8 +104,13 @@ func New(
 	accessFilter AccessFilterHelper,
 	trackSvc TrackSearchHelper,
 ) *Handler {
+	var cfg *config.Config
+	if cfgMgr != nil {
+		cfg = cfgMgr.Config()
+	}
 	return &Handler{
 		cfg:          cfg,
+		cfgMgr:       cfgMgr,
 		db:           db,
 		tgService:    tgService,
 		listener:     listener,
@@ -90,6 +119,9 @@ func New(
 		accessFilter: accessFilter,
 		trackSvc:     trackSvc,
 		startTime:    time.Now(),
+		editStates:   make(map[int64]*AdminEditState),
+		lastPages:    make(map[int64]int),
+		cookieWait:   make(map[int64]*CookieWaitState),
 	}
 }
 
@@ -122,6 +154,7 @@ func (h *Handler) routeMessage(ctx context.Context, e tg.Entities, upd message.A
 	}
 
 	text := strings.TrimSpace(msg.Message)
+	chatID, senderID, _, _ := h.extractPeerInfo(msg, e)
 
 	// Check if this message is an audio upload
 	isAudio := false
@@ -139,6 +172,26 @@ func (h *Handler) routeMessage(ctx context.Context, e tg.Entities, upd message.A
 				if strings.HasPrefix(mime, "audio/") || hasAudioAttr {
 					isAudio = true
 				}
+
+				// Check if admin is uploading a cookie .txt file
+				if h.isAdmin(senderID) && h.handleCookieDocument(ctx, e, upd, msg, senderID, doc) {
+					return
+				}
+			}
+		}
+	}
+
+	// Intercept admin text responses when in active edit state
+	if h.isAdmin(senderID) {
+		if text == "/cancel" {
+			h.clearEditState(senderID)
+			_ = h.replyHTML(ctx, e, upd, "Action cancelled.", nil)
+			return
+		}
+		if !strings.HasPrefix(text, "/") && text != "" {
+			if state := h.getEditState(senderID); state != nil {
+				h.handleAdminTextInput(ctx, e, upd, msg, senderID, text)
+				return
 			}
 		}
 	}
@@ -151,6 +204,11 @@ func (h *Handler) routeMessage(ctx context.Context, e tg.Entities, upd message.A
 		return
 	}
 
+	// If admin entered a new command, clear any pending edit prompt state
+	if h.isAdmin(senderID) {
+		h.clearEditState(senderID)
+	}
+
 	parts := strings.Fields(text)
 	if len(parts) == 0 {
 		return
@@ -159,8 +217,6 @@ func (h *Handler) routeMessage(ctx context.Context, e tg.Entities, upd message.A
 	rawCmd := parts[0][1:] // strip '/'
 	cmdName := strings.ToLower(strings.Split(rawCmd, "@")[0])
 	args := parts[1:]
-
-	chatID, senderID, _, _ := h.extractPeerInfo(msg, e)
 
 	// Ingest audio concurrently if command is not a media inspector
 	if isAudio && h.listener != nil && cmdName != "mediainfo" && cmdName != "mi" {
@@ -222,12 +278,14 @@ func (h *Handler) routeMessage(ctx context.Context, e tg.Entities, upd message.A
 		h.handleLogs(ctx, e, upd, msg, senderID)
 	case "sudo":
 		h.handleSudo(ctx, e, upd, msg, senderID)
+	case "bs":
+		h.handleBS(ctx, e, upd, msg, senderID)
 	case "restart":
 		h.handleRestart(ctx, e, upd, msg, senderID)
 	}
 }
 
-func (h *Handler) isAdmin(userID int64) bool {
+func (h *Handler) isOwner(userID int64) bool {
 	if h.cfg == nil {
 		return false
 	}
@@ -236,12 +294,59 @@ func (h *Handler) isAdmin(userID int64) bool {
 			return true
 		}
 	}
+	return false
+}
+
+func (h *Handler) isAdmin(userID int64) bool {
+	if h.isOwner(userID) {
+		return true
+	}
+	if h.cfg == nil {
+		return false
+	}
 	for _, id := range h.cfg.SudoUsers {
 		if id == userID {
 			return true
 		}
 	}
 	return false
+}
+
+func (h *Handler) getEditState(userID int64) *AdminEditState {
+	h.editMu.Lock()
+	defer h.editMu.Unlock()
+	return h.editStates[userID]
+}
+
+func (h *Handler) setEditState(userID int64, st *AdminEditState) {
+	h.editMu.Lock()
+	defer h.editMu.Unlock()
+	h.editStates[userID] = st
+}
+
+func (h *Handler) clearEditState(userID int64) {
+	h.editMu.Lock()
+	defer h.editMu.Unlock()
+	delete(h.editStates, userID)
+	delete(h.cookieWait, userID)
+}
+
+func (h *Handler) getLastPage(userID int64) int {
+	h.editMu.Lock()
+	defer h.editMu.Unlock()
+	return h.lastPages[userID]
+}
+
+func (h *Handler) setLastPage(userID int64, page int) {
+	h.editMu.Lock()
+	defer h.editMu.Unlock()
+	h.lastPages[userID] = page
+}
+
+func (h *Handler) setCookieWait(userID int64, st *CookieWaitState) {
+	h.editMu.Lock()
+	defer h.editMu.Unlock()
+	h.cookieWait[userID] = st
 }
 
 func (h *Handler) extractPeerInfo(msg *tg.Message, e tg.Entities) (chatID int64, senderID int64, senderName string, senderUsername string) {

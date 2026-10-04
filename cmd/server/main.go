@@ -32,6 +32,8 @@ func main() {
 	cfg := config.Load()
 	log.Infof("loaded config: PORT=%s, DB=%s, API_LOGS=%v", cfg.Port, cfg.DatabaseName, cfg.APILogs)
 
+	cfgMgr := config.NewManager(cfg)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -50,6 +52,13 @@ func main() {
 				defer closeCancel()
 				_ = dbClient.Close(closeCtx)
 			}()
+
+			// Synchronize dynamic bot settings from MongoDB collection botsettings (doc: bot_config)
+			syncCtx, syncCancel := context.WithTimeout(ctx, 10*time.Second)
+			if err := cfgMgr.LoadFromDB(syncCtx, dbClient.Database); err != nil {
+				log.Warnf("Failed to sync bot_config from MongoDB: %v", err)
+			}
+			syncCancel()
 		}
 	}
 
@@ -57,6 +66,14 @@ func main() {
 	lyricsSvc := services.NewLyricsEnrichmentService(cfg)
 	dedupSvc := services.NewDedupService(dbClient)
 	accessFilter := services.NewAccessFilter(cfg, dbClient)
+	cfgMgr.OnUpdate(func(key string, val any) {
+		if key == "FILTER_MODE" {
+			if m, ok := val.(int); ok {
+				accessFilter.SetMode(m)
+			}
+		}
+	})
+
 	r2Storage := services.NewR2StorageService(cfg)
 	enrichSvc := services.NewEnrichmentService(dbClient, coverSearch, lyricsSvc)
 	if r2Storage.IsConfigured() {
@@ -115,7 +132,7 @@ func main() {
 				trackSvc = services.NewTrackService(trackRepo)
 			}
 
-			cmdHandler := telegramcmd.New(cfg, dbClient, tgService, listener, authSvc, accessSvc, accessFilter, trackSvc)
+			cmdHandler := telegramcmd.New(cfgMgr, dbClient, tgService, listener, authSvc, accessSvc, accessFilter, trackSvc)
 			cmdHandler.SetupDispatcher(&tgService.Dispatcher)
 
 			log.Info("Starting Telegram MTProto multi-client pool in background...")
