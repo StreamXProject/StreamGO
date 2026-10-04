@@ -286,12 +286,29 @@ func (h *Handler) routeMessage(ctx context.Context, e tg.Entities, upd message.A
 }
 
 func (h *Handler) isOwner(userID int64) bool {
-	if h.cfg == nil {
-		return false
+	if h.cfgMgr != nil {
+		if raw := h.cfgMgr.Get("OWNER_ID"); raw != nil {
+			switch list := raw.(type) {
+			case []int64:
+				for _, id := range list {
+					if id == userID {
+						return true
+					}
+				}
+			case []int:
+				for _, id := range list {
+					if int64(id) == userID {
+						return true
+					}
+				}
+			}
+		}
 	}
-	for _, id := range h.cfg.OwnerIDs {
-		if id == userID {
-			return true
+	if h.cfg != nil {
+		for _, id := range h.cfg.OwnerIDs {
+			if id == userID {
+				return true
+			}
 		}
 	}
 	return false
@@ -301,12 +318,29 @@ func (h *Handler) isAdmin(userID int64) bool {
 	if h.isOwner(userID) {
 		return true
 	}
-	if h.cfg == nil {
-		return false
+	if h.cfgMgr != nil {
+		if raw := h.cfgMgr.Get("SUDO_USERS"); raw != nil {
+			switch list := raw.(type) {
+			case []int64:
+				for _, id := range list {
+					if id == userID {
+						return true
+					}
+				}
+			case []int:
+				for _, id := range list {
+					if int64(id) == userID {
+						return true
+					}
+				}
+			}
+		}
 	}
-	for _, id := range h.cfg.SudoUsers {
-		if id == userID {
-			return true
+	if h.cfg != nil {
+		for _, id := range h.cfg.SudoUsers {
+			if id == userID {
+				return true
+			}
 		}
 	}
 	return false

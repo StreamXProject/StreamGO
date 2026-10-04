@@ -154,7 +154,7 @@ func (m *ConfigManager) LoadFromDB(ctx context.Context, db *mongo.Database) erro
 		m.applyValueLocked(key, dbVal)
 	}
 
-	log.Info("Successfully synchronized bot_config from MongoDB")
+	log.Infof("Successfully synchronized bot_config from MongoDB (OWNER_ID=%v, SUDO_USERS=%v)", m.cfg.OwnerIDs, m.cfg.SudoUsers)
 	return nil
 }
 
@@ -546,15 +546,35 @@ func toInt64(v any) int64 {
 	switch n := v.(type) {
 	case int:
 		return int64(n)
+	case int8:
+		return int64(n)
+	case int16:
+		return int64(n)
 	case int32:
 		return int64(n)
 	case int64:
 		return n
+	case uint:
+		return int64(n)
+	case uint8:
+		return int64(n)
+	case uint16:
+		return int64(n)
+	case uint32:
+		return int64(n)
+	case uint64:
+		return int64(n)
+	case float32:
+		return int64(n)
 	case float64:
 		return int64(n)
 	case string:
-		if i, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64); err == nil {
+		s := strings.TrimSpace(n)
+		if i, err := strconv.ParseInt(s, 10, 64); err == nil {
 			return i
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return int64(f)
 		}
 	}
 	return 0
@@ -567,8 +587,24 @@ func toInt64List(v any) []int64 {
 	if list, ok := v.([]int64); ok {
 		return list
 	}
+	if list, ok := v.([]int); ok {
+		out := make([]int64, len(list))
+		for i, id := range list {
+			out[i] = int64(id)
+		}
+		return out
+	}
 	if s, ok := v.(string); ok {
 		return parseIDList(s)
+	}
+	if arr, ok := v.(bson.A); ok {
+		var out []int64
+		for _, item := range arr {
+			if id := toInt64(item); id != 0 {
+				out = append(out, id)
+			}
+		}
+		return out
 	}
 	if arr, ok := v.([]any); ok {
 		var out []int64
@@ -578,6 +614,19 @@ func toInt64List(v any) []int64 {
 			}
 		}
 		return out
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Slice {
+		var out []int64
+		for i := 0; i < rv.Len(); i++ {
+			if id := toInt64(rv.Index(i).Interface()); id != 0 {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	if id := toInt64(v); id != 0 {
+		return []int64{id}
 	}
 	return []int64{}
 }
@@ -608,10 +657,25 @@ func toStringList(v any) []string {
 		}
 		return out
 	}
+	if arr, ok := v.(bson.A); ok {
+		var out []string
+		for _, item := range arr {
+			out = append(out, fmt.Sprintf("%v", item))
+		}
+		return out
+	}
 	if arr, ok := v.([]any); ok {
 		var out []string
 		for _, item := range arr {
 			out = append(out, fmt.Sprintf("%v", item))
+		}
+		return out
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Slice {
+		var out []string
+		for i := 0; i < rv.Len(); i++ {
+			out = append(out, fmt.Sprintf("%v", rv.Index(i).Interface()))
 		}
 		return out
 	}
@@ -629,7 +693,11 @@ func isEmptyValue(v any) bool {
 		return len(val) == 0
 	case []int64:
 		return len(val) == 0
+	case []int:
+		return len(val) == 0
 	case []any:
+		return len(val) == 0
+	case bson.A:
 		return len(val) == 0
 	}
 	rv := reflect.ValueOf(v)
