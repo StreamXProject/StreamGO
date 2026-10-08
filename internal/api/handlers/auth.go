@@ -569,13 +569,49 @@ func (h *AuthHandler) SetupPassword(w http.ResponseWriter, r *http.Request) {
 
 // ServerPasswordLogin handles POST /auth/password.
 func (h *AuthHandler) ServerPasswordLogin(w http.ResponseWriter, r *http.Request) {
-	var payload models.SetupPasswordRequest
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		api.RespondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	token, err := h.authSvc.LoginWithServerPassword(r.Context(), payload.Password)
+	username, _ := body["username"].(string)
+	password, _ := body["password"].(string)
+
+	// If username is provided and not "guest", treat as user login with password (matching Swagger schema)
+	if strings.TrimSpace(username) != "" && !strings.EqualFold(strings.TrimSpace(username), "guest") {
+		if strings.TrimSpace(password) == "" {
+			api.RespondError(w, http.StatusBadRequest, "password is required")
+			return
+		}
+
+		resp, err := h.authSvc.LoginWithPassword(r.Context(), username, password)
+		if err != nil {
+			if strings.Contains(err.Error(), "invalid username") {
+				api.RespondError(w, http.StatusBadRequest, err.Error())
+			} else {
+				api.RespondError(w, http.StatusUnauthorized, err.Error())
+			}
+			return
+		}
+
+		if r.URL.Query().Get("set_cookie") == "true" || r.URL.Query().Get("set_cookie") == "1" {
+			h.authSvc.SetAuthCookie(w, resp.Token)
+		}
+
+		api.RespondJSON(w, http.StatusOK, map[string]any{
+			"ok":          true,
+			"user_id":     resp.UserID,
+			"token":       resp.Token,
+			"first_name":  resp.FirstName,
+			"username":    resp.Username,
+			"profile_url": resp.ProfileURL,
+			"photo_url":   resp.PhotoURL,
+		})
+		return
+	}
+
+	token, err := h.authSvc.LoginWithServerPassword(r.Context(), password)
 	if err != nil {
 		api.RespondError(w, http.StatusUnauthorized, err.Error())
 		return

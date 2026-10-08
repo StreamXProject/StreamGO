@@ -766,20 +766,6 @@ func (s *AuthService) LoginWithPassword(ctx context.Context, username, password 
 		return nil, err
 	}
 	if user == nil || user.Password == nil {
-		// Fallback: if username is not in DB but password matches guest password, allow guest session
-		if s.VerifyGuestPassword(ctx, password) {
-			token, err := s.CreateGuestToken()
-			if err != nil {
-				return nil, err
-			}
-			return &models.AuthResponse{
-				OK:        true,
-				Token:     token,
-				UserID:    0,
-				FirstName: "Guest",
-				Username:  "guest",
-			}, nil
-		}
 		return nil, errors.New("invalid credentials")
 	}
 

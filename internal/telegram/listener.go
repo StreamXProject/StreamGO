@@ -111,8 +111,18 @@ func (l *IngestionListener) HandleMessage(ctx context.Context, msg *tg.Message) 
 		}
 	}
 
-	isAudio := strings.HasPrefix(mimeType, "audio/") || audioAttr != nil
+	lowerFileName := strings.ToLower(strings.TrimSpace(fileName))
+	isAudioExt := strings.HasSuffix(lowerFileName, ".flac") || strings.HasSuffix(lowerFileName, ".mp3") ||
+		strings.HasSuffix(lowerFileName, ".wav") || strings.HasSuffix(lowerFileName, ".wave") ||
+		strings.HasSuffix(lowerFileName, ".m4a") || strings.HasSuffix(lowerFileName, ".alac") ||
+		strings.HasSuffix(lowerFileName, ".aac") || strings.HasSuffix(lowerFileName, ".ogg") ||
+		strings.HasSuffix(lowerFileName, ".opus") || strings.HasSuffix(lowerFileName, ".aif") ||
+		strings.HasSuffix(lowerFileName, ".aiff") || strings.HasSuffix(lowerFileName, ".wma")
+
+	isAudio := strings.HasPrefix(mimeType, "audio/") || audioAttr != nil || isAudioExt ||
+		mimeType == "application/x-flac" || mimeType == "application/flac" || mimeType == "application/ogg"
 	if !isAudio {
+		log.Infof("[listener] Ignored document: not recognized as audio (mime: %q, file: %q)", doc.MimeType, fileName)
 		return
 	}
 
@@ -129,19 +139,39 @@ func (l *IngestionListener) HandleMessage(ctx context.Context, msg *tg.Message) 
 
 	// Access filter check
 	if l.accessFilter != nil && !l.accessFilter.IsChatAllowed(ctx, chatID) {
-		log.Debugf("Ignored audio from unauthorized chat: %d", chatID)
+		log.Warnf("[listener] Ignored audio from unauthorized chat: %d (channel_id: %d)", chatID, l.cfg.ChannelID)
 		return
 	}
 
 	// Metadata extraction
 	title := ""
 	artist := ""
+	album := ""
+	var year int32
 	duration := 0.0
 
 	if audioAttr != nil {
 		title = strings.TrimSpace(audioAttr.Title)
 		artist = strings.TrimSpace(audioAttr.Performer)
 		duration = float64(audioAttr.Duration)
+	}
+
+	// Also extract metadata from caption if present (e.g. Album: ..., Track: ..., Quality: ...)
+	caption := strings.TrimSpace(msg.Message)
+	if caption != "" {
+		cTitle, cArtist, cAlbum, cYear := parseCaptionMetadata(caption)
+		if title == "" && cTitle != "" {
+			title = cTitle
+		}
+		if artist == "" && cArtist != "" {
+			artist = cArtist
+		}
+		if album == "" && cAlbum != "" {
+			album = cAlbum
+		}
+		if year == 0 && cYear > 0 {
+			year = int32(cYear)
+		}
 	}
 
 	if title == "" {
@@ -158,10 +188,14 @@ func (l *IngestionListener) HandleMessage(ctx context.Context, msg *tg.Message) 
 	topicName := ""
 	if msg.ReplyTo != nil {
 		if header, ok := msg.ReplyTo.(*tg.MessageReplyHeader); ok {
-			if header.ReplyToTopID != 0 {
+			if header.ForumTopic {
+				if header.ReplyToTopID != 0 {
+					topicID = int32(header.ReplyToTopID)
+				} else if header.ReplyToMsgID != 0 {
+					topicID = int32(header.ReplyToMsgID)
+				}
+			} else if header.ReplyToTopID != 0 {
 				topicID = int32(header.ReplyToTopID)
-			} else if header.ReplyToMsgID != 0 {
-				topicID = int32(header.ReplyToMsgID)
 			}
 		}
 	}
@@ -186,13 +220,16 @@ func (l *IngestionListener) HandleMessage(ctx context.Context, msg *tg.Message) 
 	}
 
 	// Filter by CHAT_TOPIC if configured
-	if l.cfg != nil && l.cfg.ChatTopic != "" && l.cfg.ChatTopic != "all" {
-		if l.cfg.ChatTopic == "0" {
+	chatTopicSetting := strings.ToLower(strings.TrimSpace(l.cfg.ChatTopic))
+	if l.cfg != nil && chatTopicSetting != "" && chatTopicSetting != "all" {
+		if chatTopicSetting == "0" {
 			if topicID != 0 {
+				log.Infof("[listener] Ignored audio track: topic %d filtered by CHAT_TOPIC=0", topicID)
 				return
 			}
-		} else if targetID, err := strconv.ParseInt(l.cfg.ChatTopic, 10, 64); err == nil {
+		} else if targetID, err := strconv.ParseInt(chatTopicSetting, 10, 64); err == nil {
 			if int64(topicID) != targetID {
+				log.Infof("[listener] Ignored audio track: topic %d filtered by CHAT_TOPIC=%d", topicID, targetID)
 				return
 			}
 		}
@@ -245,7 +282,6 @@ func (l *IngestionListener) HandleMessage(ctx context.Context, msg *tg.Message) 
 		audioExt = "wav"
 	}
 
-	album := ""
 	durSec := int32(math.Round(duration))
 
 	// Deduplication check
@@ -298,7 +334,12 @@ func (l *IngestionListener) HandleMessage(ctx context.Context, msg *tg.Message) 
 	}
 	if album != "" {
 		audioDoc["album"] = album
-		aid := metadata.AlbumID(album, nil)
+		var yPtr *int32
+		if year > 0 {
+			yPtr = &year
+			audioDoc["year"] = year
+		}
+		aid := metadata.AlbumID(album, yPtr)
 		if aid != "" {
 			audioDoc["album_id"] = aid
 		}
@@ -413,4 +454,39 @@ func normalizeMimeType(mime string, fileName string) string {
 	default:
 		return raw
 	}
+}
+
+var (
+	albumYearRegex = regexp.MustCompile(`\[(\d{4})\]`)
+	albumByRegex   = regexp.MustCompile(`(?i)\s+by\s+(.+)$`)
+)
+
+func parseCaptionMetadata(caption string) (cTitle, cArtist, cAlbum string, cYear int) {
+	if caption == "" {
+		return
+	}
+	lines := strings.Split(caption, "\n")
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "album:") {
+			val := strings.TrimSpace(trimmed[6:])
+			if m := albumYearRegex.FindStringSubmatch(val); len(m) > 1 {
+				if y, err := strconv.Atoi(m[1]); err == nil {
+					cYear = y
+				}
+			}
+			if m := albumByRegex.FindStringSubmatch(val); len(m) > 1 {
+				cArtist = strings.TrimSpace(m[1])
+				val = albumByRegex.ReplaceAllString(val, "")
+			}
+			val = albumYearRegex.ReplaceAllString(val, "")
+			cAlbum = strings.TrimSpace(val)
+		} else if strings.HasPrefix(lower, "track:") {
+			cTitle = strings.TrimSpace(trimmed[6:])
+		} else if strings.HasPrefix(lower, "artist:") {
+			cArtist = strings.TrimSpace(trimmed[7:])
+		}
+	}
+	return
 }

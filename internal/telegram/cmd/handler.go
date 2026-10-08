@@ -185,13 +185,25 @@ func (h *Handler) routeMessage(ctx context.Context, e tg.Entities, upd message.A
 			if doc, ok := docMedia.Document.(*tg.Document); ok {
 				mime := strings.ToLower(doc.MimeType)
 				hasAudioAttr := false
+				var fileName string
 				for _, attr := range doc.Attributes {
-					if _, ok := attr.(*tg.DocumentAttributeAudio); ok {
+					switch a := attr.(type) {
+					case *tg.DocumentAttributeAudio:
 						hasAudioAttr = true
-						break
+					case *tg.DocumentAttributeFilename:
+						fileName = strings.ToLower(strings.TrimSpace(a.FileName))
 					}
 				}
-				if strings.HasPrefix(mime, "audio/") || hasAudioAttr {
+
+				isAudioExt := strings.HasSuffix(fileName, ".flac") || strings.HasSuffix(fileName, ".mp3") ||
+					strings.HasSuffix(fileName, ".wav") || strings.HasSuffix(fileName, ".wave") ||
+					strings.HasSuffix(fileName, ".m4a") || strings.HasSuffix(fileName, ".alac") ||
+					strings.HasSuffix(fileName, ".aac") || strings.HasSuffix(fileName, ".ogg") ||
+					strings.HasSuffix(fileName, ".opus") || strings.HasSuffix(fileName, ".aif") ||
+					strings.HasSuffix(fileName, ".aiff") || strings.HasSuffix(fileName, ".wma")
+
+				if strings.HasPrefix(mime, "audio/") || hasAudioAttr || isAudioExt ||
+					mime == "application/x-flac" || mime == "application/flac" || mime == "application/ogg" {
 					isAudio = true
 				}
 

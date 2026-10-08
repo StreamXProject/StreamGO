@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -129,11 +130,17 @@ func (r *mongoUserRepository) GetUserByID(ctx context.Context, id int64) (*model
 
 // GetUserByUsername fetches a user by canonical username.
 func (r *mongoUserRepository) GetUserByUsername(ctx context.Context, username string) (*models.User, error) {
-	username = strings.TrimSpace(strings.ToLower(username))
+	username = strings.TrimSpace(username)
 	if username == "" {
 		return nil, nil
 	}
-	filter := bson.M{"username": username}
+	pattern := fmt.Sprintf("^%s$", regexp.QuoteMeta(username))
+	filter := bson.M{
+		"$or": []bson.M{
+			{"username": bson.M{"$regex": pattern, "$options": "i"}},
+			{"telegram.username": bson.M{"$regex": pattern, "$options": "i"}},
+		},
+	}
 	var u models.User
 	err := r.usersCol.FindOne(ctx, filter).Decode(&u)
 	if err != nil {
