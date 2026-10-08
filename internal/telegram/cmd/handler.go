@@ -157,8 +157,26 @@ func (h *Handler) routeMessage(ctx context.Context, e tg.Entities, upd message.A
 		return
 	}
 
+	// Cache access hashes from entities
+	if w := h.tgService.PrimaryWorker(); w != nil {
+		for uid, u := range e.Users {
+			if u != nil && u.AccessHash != 0 {
+				w.SetUserAccessHash(uid, u.AccessHash)
+			}
+		}
+		for cid, ch := range e.Channels {
+			if ch != nil && ch.AccessHash != 0 {
+				w.SetChannelAccessHash(cid, ch.AccessHash)
+			}
+		}
+	}
+
 	text := strings.TrimSpace(msg.Message)
 	chatID, senderID, _, _ := h.extractPeerInfo(msg, e)
+
+	if text != "" {
+		log.Infof("[telegram] Received message from user %d in chat %d: %q", senderID, chatID, text)
+	}
 
 	// Check if this message is an audio upload
 	isAudio := false
@@ -414,6 +432,9 @@ func (h *Handler) extractPeerInfo(msg *tg.Message, e tg.Entities) (chatID int64,
 			senderName = strings.TrimSpace(senderName + " " + u.LastName)
 		}
 		senderUsername = u.Username
+		if w := h.tgService.PrimaryWorker(); w != nil && u.AccessHash != 0 {
+			w.SetUserAccessHash(senderID, u.AccessHash)
+		}
 	}
 
 	return

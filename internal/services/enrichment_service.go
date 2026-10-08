@@ -16,6 +16,7 @@ import (
 
 	"streamgo/internal/database"
 	"streamgo/internal/logger"
+	"streamgo/internal/metadata"
 	"streamgo/internal/models"
 )
 
@@ -650,9 +651,7 @@ func (s *EnrichmentService) enrichSingleTrack(ctx context.Context, trackID strin
 
 	// 10. Update artist entity incrementally
 	if artist != "" && s.artistsCol != nil {
-		slug := strings.ToLower(NormalizeText(artist))
-		slug = strings.ReplaceAll(slug, " ", "_")
-		artistID := "artist_" + slug
+		artistID := metadata.ArtistID(artist)
 		artistCover, _ := s.coverSearch.FindArtistAvatar(ctx, artist)
 		artistUpdate := bson.M{
 			"$setOnInsert": bson.M{

@@ -11,6 +11,5 @@ services:
     volumes:
       - ./stream_media:/app/stream_media
       - ./cookies:/app/cookies
-      # Optional: uncomment to mount host dist for live frontend development without image rebuild
-      # - ./dist:/app/dist:ro
+      - ./dist:/app/dist:ro
     restart: unless-stopped

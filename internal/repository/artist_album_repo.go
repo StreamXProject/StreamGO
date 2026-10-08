@@ -14,6 +14,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"streamgo/internal/database"
+	"streamgo/internal/metadata"
 	"streamgo/internal/models"
 )
 
@@ -50,13 +51,8 @@ func splitArtists(value string) []string {
 	return out
 }
 
-var nonAlphaNumRe = regexp.MustCompile(`[^\p{L}\p{N}]+`)
-
 func slugify(val string) string {
-	s := strings.ToLower(val)
-	s = nonAlphaNumRe.ReplaceAllString(s, " ")
-	s = strings.TrimSpace(s)
-	return strings.ReplaceAll(s, " ", "_")
+	return metadata.Slugify(val)
 }
 
 // ArtistAlbumRepository manages data access for artists and albums.
@@ -203,16 +199,26 @@ func (r *mongoArtistAlbumRepository) RefreshArtistsCache(ctx context.Context, li
 		}
 	}
 
+	// Clean up legacy documents with spaces in _id or collaborative names
+	_, _ = r.artistsCol.DeleteMany(ctx, bson.M{
+		"$or": []bson.M{
+			{"_id": bson.M{"$regex": " "}},
+			{"name": bson.M{"$regex": `(?i)/|,|&|\s+feat|\s+ft\s+|\s+featuring\s+`}},
+			{"match_artist": bson.M{"$regex": `(?i)/|,|&|\s+feat|\s+ft\s+|\s+featuring\s+`}},
+		},
+	})
+
 	now := float64(time.Now().Unix())
 	upserted := 0
 	var writeModels []mongo.WriteModel
+	var validAIDs []string
 
 	for _, entry := range byKey {
-		slug := slugify(entry.Name)
-		if slug == "" {
+		aid := metadata.ArtistID(entry.Name)
+		if aid == "" {
 			continue
 		}
-		aid := "artist_" + slug
+		validAIDs = append(validAIDs, aid)
 		updateDoc := bson.M{
 			"name":         entry.Name,
 			"match_artist": entry.MatchArtist,
@@ -248,6 +254,13 @@ func (r *mongoArtistAlbumRepository) RefreshArtistsCache(ctx context.Context, li
 	if len(writeModels) > 0 {
 		_, _ = r.artistsCol.BulkWrite(ctx, writeModels, options.BulkWrite().SetOrdered(false))
 		upserted += len(writeModels)
+	}
+
+	// Purge orphan artists whose canonical IDs are no longer in active scan
+	if len(validAIDs) > 0 {
+		_, _ = r.artistsCol.DeleteMany(ctx, bson.M{
+			"_id": bson.M{"$nin": validAIDs},
+		})
 	}
 
 	return upserted, nil
@@ -299,6 +312,10 @@ func (r *mongoArtistAlbumRepository) ListArtists(ctx context.Context, page, perP
 		return nil, 0, fmt.Errorf("failed to decode artists: %w", err)
 	}
 
+	var uniqueArtists []*models.Artist
+	seenNames := make(map[string]bool)
+	seenIDs := make(map[string]bool)
+
 	for _, a := range artists {
 		if a.Id == "" {
 			a.Id = a.ID
@@ -309,9 +326,19 @@ func (r *mongoArtistAlbumRepository) ListArtists(ctx context.Context, page, perP
 		if a.TrackCount == 0 {
 			a.TrackCount = a.TracksCount
 		}
+		if a.TracksCount <= 0 {
+			continue
+		}
+		nameNorm := strings.ToLower(strings.TrimSpace(a.Name))
+		if nameNorm == "" || seenNames[nameNorm] || seenIDs[a.Id] {
+			continue
+		}
+		seenNames[nameNorm] = true
+		seenIDs[a.Id] = true
+		uniqueArtists = append(uniqueArtists, a)
 	}
 
-	return artists, total, nil
+	return uniqueArtists, total, nil
 }
 
 func (r *mongoArtistAlbumRepository) GetArtistByID(ctx context.Context, id string) (*models.Artist, error) {
@@ -457,7 +484,23 @@ func (r *mongoArtistAlbumRepository) GetArtistAlbums(ctx context.Context, artist
 		}
 	}
 
-	return albums, nil
+	var uniqueAlbums []*models.Album
+	seenTitles := make(map[string]bool)
+	seenIDs := make(map[string]bool)
+	for _, a := range albums {
+		if a.TracksCount <= 0 {
+			continue
+		}
+		titleNorm := strings.ToLower(strings.TrimSpace(a.Title))
+		if titleNorm == "" || seenTitles[titleNorm] || seenIDs[a.Id] {
+			continue
+		}
+		seenTitles[titleNorm] = true
+		seenIDs[a.Id] = true
+		uniqueAlbums = append(uniqueAlbums, a)
+	}
+
+	return uniqueAlbums, nil
 }
 
 func (r *mongoArtistAlbumRepository) RefreshAlbumsCache(ctx context.Context, limit int) (int, error) {
@@ -597,6 +640,20 @@ func (r *mongoArtistAlbumRepository) RefreshAlbumsCache(ctx context.Context, lim
 		upserted += len(writeModels)
 	}
 
+	// Purge orphan albums that no longer have any active tracks in audioTracks
+	distinctRes := r.tracksCol.Distinct(ctx, "audio.album_id", bson.M{
+		"deleted":        bson.M{"$ne": true},
+		"audio.album_id": bson.M{"$exists": true, "$ne": ""},
+	})
+	if distinctRes.Err() == nil {
+		var distinctAIDs []string
+		if err := distinctRes.Decode(&distinctAIDs); err == nil && len(distinctAIDs) > 0 {
+			_, _ = r.albumsCol.DeleteMany(ctx, bson.M{
+				"_id": bson.M{"$nin": distinctAIDs},
+			})
+		}
+	}
+
 	return upserted, nil
 }
 
@@ -656,6 +713,10 @@ func (r *mongoArtistAlbumRepository) ListAlbums(ctx context.Context, page, perPa
 		return nil, 0, err
 	}
 
+	var uniqueAlbums []*models.Album
+	seenKeys := make(map[string]bool)
+	seenIDs := make(map[string]bool)
+
 	for _, a := range albums {
 		if a.Id == "" {
 			a.Id = a.ID
@@ -663,9 +724,19 @@ func (r *mongoArtistAlbumRepository) ListAlbums(ctx context.Context, page, perPa
 		if a.TrackCount == 0 {
 			a.TrackCount = a.TracksCount
 		}
+		if a.TracksCount <= 0 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(a.Title)) + "::" + strings.ToLower(strings.TrimSpace(a.Artist))
+		if seenKeys[key] || seenIDs[a.Id] {
+			continue
+		}
+		seenKeys[key] = true
+		seenIDs[a.Id] = true
+		uniqueAlbums = append(uniqueAlbums, a)
 	}
 
-	return albums, total, nil
+	return uniqueAlbums, total, nil
 }
 
 func (r *mongoArtistAlbumRepository) GetAlbumByID(ctx context.Context, id string) (*models.Album, error) {

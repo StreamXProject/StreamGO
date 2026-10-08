@@ -298,9 +298,9 @@ func (l *IngestionListener) HandleMessage(ctx context.Context, msg *tg.Message) 
 	}
 	if album != "" {
 		audioDoc["album"] = album
-		aid := slugify(album)
+		aid := metadata.AlbumID(album, nil)
 		if aid != "" {
-			audioDoc["album_id"] = "album_" + aid
+			audioDoc["album_id"] = aid
 		}
 	}
 

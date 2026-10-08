@@ -319,10 +319,7 @@ func (m *ConfigManager) RemoveIDs(ctx context.Context, key string, ids []int64) 
 	return err
 }
 
-// GetOverrideType returns the configured override type for the key or "default".
-func (m *ConfigManager) GetOverrideType(key string) string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+func (m *ConfigManager) getOverrideTypeLocked(key string) string {
 	key = strings.ToUpper(strings.TrimSpace(key))
 	if t, ok := m.overrideTypes[key]; ok && t != "" {
 		return t
@@ -330,18 +327,15 @@ func (m *ConfigManager) GetOverrideType(key string) string {
 	return "default"
 }
 
-// GetTargetType returns the effective type ("str", "int", "bool", "list") for the key.
-func (m *ConfigManager) GetTargetType(key string) string {
-	ov := m.GetOverrideType(key)
-	if ov != "default" {
-		return ov
-	}
-	return m.GetDefaultType(key)
+// GetOverrideType returns the configured override type for the key or "default".
+func (m *ConfigManager) GetOverrideType(key string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.getOverrideTypeLocked(key)
 }
 
-// GetDefaultType returns the base Go type name ("str", "int", "bool", "list") for the key.
-func (m *ConfigManager) GetDefaultType(key string) string {
-	val := m.Get(key)
+func (m *ConfigManager) getDefaultTypeLocked(key string) string {
+	val := m.getAllConfigLocked()[key]
 	if val == nil {
 		return "str"
 	}
@@ -357,6 +351,28 @@ func (m *ConfigManager) GetDefaultType(key string) string {
 	default:
 		return "str"
 	}
+}
+
+// GetDefaultType returns the base Go type name ("str", "int", "bool", "list") for the key.
+func (m *ConfigManager) GetDefaultType(key string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.getDefaultTypeLocked(key)
+}
+
+func (m *ConfigManager) getTargetTypeLocked(key string) string {
+	ov := m.getOverrideTypeLocked(key)
+	if ov != "default" {
+		return ov
+	}
+	return m.getDefaultTypeLocked(key)
+}
+
+// GetTargetType returns the effective type ("str", "int", "bool", "list") for the key.
+func (m *ConfigManager) GetTargetType(key string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.getTargetTypeLocked(key)
 }
 
 func (m *ConfigManager) getAllConfigLocked() map[string]any {
@@ -409,7 +425,7 @@ func (m *ConfigManager) getAllConfigLocked() map[string]any {
 }
 
 func (m *ConfigManager) processValueLocked(key string, val any) any {
-	targetType := m.GetTargetType(key)
+	targetType := m.getTargetTypeLocked(key)
 
 	switch targetType {
 	case "bool":

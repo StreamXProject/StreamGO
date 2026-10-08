@@ -1,8 +1,69 @@
 package metadata
 
 import (
+	"crypto/sha1"
+	"fmt"
+	"regexp"
 	"strings"
+	"unicode"
+
+	"golang.org/x/text/transform"
+	"golang.org/x/text/unicode/norm"
 )
+
+var albumSlugRegex = regexp.MustCompile(`[^a-z0-9 ]+`)
+
+// Slugify converts text into a canonical lowercase alphanumeric slug with underscores.
+// If non-Latin/empty, falls back to u_<sha1_16>.
+func Slugify(value string) string {
+	raw := strings.ToLower(strings.TrimSpace(value))
+	if raw == "" {
+		return ""
+	}
+	s := strings.ReplaceAll(raw, "÷", " divide ")
+	s = strings.ReplaceAll(s, "&", " and ")
+	s = strings.ReplaceAll(s, "+", " plus ")
+
+	// NFKD normalization to ASCII
+	t := transform.Chain(norm.NFKD, transform.RemoveFunc(func(r rune) bool {
+		return unicode.Is(unicode.Mn, r) // mn: nonspacing marks
+	}))
+	ascii, _, _ := transform.String(t, s)
+
+	// Keep only alphanumeric and space
+	ascii = albumSlugRegex.ReplaceAllString(ascii, " ")
+	tokens := strings.Fields(ascii)
+	s = strings.Join(tokens, "_")
+	s = strings.Trim(s, "_")
+
+	if s != "" {
+		return s
+	}
+
+	h := sha1.Sum([]byte(raw))
+	return fmt.Sprintf("u_%x", h[:8])
+}
+
+// ArtistID returns the canonical artist ID: artist_<slug>.
+func ArtistID(name string) string {
+	s := Slugify(name)
+	if s == "" {
+		return ""
+	}
+	return "artist_" + s
+}
+
+// AlbumID returns the canonical album ID: album_<slug>_<year> or album_<slug>.
+func AlbumID(album string, year *int32) string {
+	b := Slugify(album)
+	if b == "" {
+		return ""
+	}
+	if year != nil && *year >= 1000 && *year <= 2100 {
+		return fmt.Sprintf("album_%s_%d", b, *year)
+	}
+	return fmt.Sprintf("album_%s", b)
+}
 
 // NormalizePunctuation standardizes full-width and non-standard punctuation to ASCII equivalents.
 func NormalizePunctuation(s string) string {

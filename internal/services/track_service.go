@@ -198,10 +198,14 @@ func (s *TrackService) DeleteTrack(ctx context.Context, id string, opts DeleteTr
 
 	// 1. Purge local transcode cache if requested
 	if opts.PurgeCache {
-		cacheFile := filepath.Join("stream_media", "alac_cache", fmt.Sprintf("%s.flac", id))
-		if info, err := os.Stat(cacheFile); err == nil && !info.IsDir() {
-			if rmErr := os.Remove(cacheFile); rmErr == nil {
-				res.CachePurged = true
+		pattern := filepath.Join("stream_media", "alac_cache", fmt.Sprintf("%s*", id))
+		if files, err := filepath.Glob(pattern); err == nil {
+			for _, file := range files {
+				if info, err := os.Stat(file); err == nil && !info.IsDir() {
+					if rmErr := os.Remove(file); rmErr == nil {
+						res.CachePurged = true
+					}
+				}
 			}
 		}
 	}

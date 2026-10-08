@@ -507,13 +507,95 @@ func (r *mongoTrackRepository) HardDelete(ctx context.Context, id string) error 
 		return errors.New("track id is required")
 	}
 
-	res, err := r.col.DeleteOne(ctx, bson.M{"_id": id})
+	// 1. Fetch track first if possible to find any alternate IDs (file_unique_id, telegram.file_unique_id)
+	targetIDsMap := map[string]struct{}{id: {}}
+	var track models.Track
+	if err := r.col.FindOne(ctx, bson.M{"_id": id}).Decode(&track); err == nil {
+		if strings.TrimSpace(track.ID) != "" {
+			targetIDsMap[strings.TrimSpace(track.ID)] = struct{}{}
+		}
+		if strings.TrimSpace(track.Telegram.FileUniqueID) != "" {
+			targetIDsMap[strings.TrimSpace(track.Telegram.FileUniqueID)] = struct{}{}
+		}
+	}
+
+	var targetIDs []string
+	for tid := range targetIDsMap {
+		targetIDs = append(targetIDs, tid)
+	}
+
+	// 2. Cascade delete from audioTracks
+	res, err := r.col.DeleteMany(ctx, bson.M{
+		"$or": []bson.M{
+			{"_id": bson.M{"$in": targetIDs}},
+			{"file_unique_id": bson.M{"$in": targetIDs}},
+			{"telegram.file_unique_id": bson.M{"$in": targetIDs}},
+		},
+	})
 	if err != nil {
 		return err
 	}
 	if res.DeletedCount == 0 {
 		return errors.New("track not found")
 	}
+
+	// 3. Cascade delete from user_favourites
+	_, _ = r.db.Collection("user_favourites").DeleteMany(ctx, bson.M{
+		"$or": []bson.M{
+			{"track_id": bson.M{"$in": targetIDs}},
+			{"file_unique_id": bson.M{"$in": targetIDs}},
+		},
+	})
+
+	// 4. Cascade delete from playlist_tracks
+	_, _ = r.db.Collection("playlist_tracks").DeleteMany(ctx, bson.M{
+		"$or": []bson.M{
+			{"track_id": bson.M{"$in": targetIDs}},
+			{"file_unique_id": bson.M{"$in": targetIDs}},
+		},
+	})
+
+	// 5. Cascade delete from userHistory
+	_, _ = r.db.Collection("userHistory").DeleteMany(ctx, bson.M{
+		"$or": []bson.M{
+			{"track_id": bson.M{"$in": targetIDs}},
+			{"file_unique_id": bson.M{"$in": targetIDs}},
+		},
+	})
+
+	// 6. Cascade delete from userPlayback
+	var pbFilters []bson.M
+	for _, tid := range targetIDs {
+		pbFilters = append(pbFilters,
+			bson.M{"track_id": tid},
+			bson.M{"file_unique_id": tid},
+			bson.M{"_id": bson.M{"$regex": ":" + regexp.QuoteMeta(tid) + ":"}},
+		)
+	}
+	_, _ = r.db.Collection("userPlayback").DeleteMany(ctx, bson.M{"$or": pbFilters})
+
+	// 7. Cascade delete from globalPlayback
+	_, _ = r.db.Collection("globalPlayback").DeleteMany(ctx, bson.M{
+		"$or": []bson.M{
+			{"_id": bson.M{"$in": targetIDs}},
+			{"track_id": bson.M{"$in": targetIDs}},
+		},
+	})
+
+	// 8. Cascade delete from listening_events
+	_, _ = r.db.Collection("listening_events").DeleteMany(ctx, bson.M{
+		"$or": []bson.M{
+			{"track_id": bson.M{"$in": targetIDs}},
+			{"file_unique_id": bson.M{"$in": targetIDs}},
+		},
+	})
+
+	// 9. Cascade clean daily_playlists by pulling all references
+	_, _ = r.db.Collection("daily_playlists").UpdateMany(ctx,
+		bson.M{"track_ids": bson.M{"$in": targetIDs}},
+		bson.M{"$pull": bson.M{"track_ids": bson.M{"$in": targetIDs}}},
+	)
+
 	return nil
 }
 

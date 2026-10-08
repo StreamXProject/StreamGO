@@ -345,6 +345,7 @@ func (h *Handler) handleAdminCallback(ctx context.Context, e tg.Entities, update
 				Alert:   true,
 			})
 		} else {
+			h.clearEditState(update.UserID)
 			_, _ = w.API.MessagesSetBotCallbackAnswer(ctx, &tg.MessagesSetBotCallbackAnswerRequest{
 				QueryID: update.QueryID,
 				Message: fmt.Sprintf("Cleared %s!", key),
@@ -612,6 +613,14 @@ func (h *Handler) handleAdminTextInput(ctx context.Context, e tg.Entities, upd m
 		Revoke: true,
 	})
 
+	inputPeer := state.InputPeer
+	if u, ok := e.Users[senderID]; ok && u != nil && u.AccessHash != 0 {
+		inputPeer = u.AsInputPeer()
+		w.SetUserAccessHash(senderID, u.AccessHash)
+	} else if hash := w.GetUserAccessHash(senderID); hash != 0 {
+		inputPeer = &tg.InputPeerUser{UserID: senderID, AccessHash: hash}
+	}
+
 	if state.Action == "add" || state.Action == "remove" {
 		tokens := strings.FieldsFunc(text, func(r rune) bool {
 			return r == ',' || r == ' ' || r == ';'
@@ -648,16 +657,20 @@ func (h *Handler) handleAdminTextInput(ctx context.Context, e tg.Entities, upd m
 					markup.Callback("Close", []byte("close_settings")),
 				),
 			)
-			_ = h.editMessage(ctx, state.Peer, e, state.MsgID, fmt.Sprintf("ㄨ Error: %s", html.EscapeString(err.Error())), kb)
+			_ = h.editMessage(ctx, state.Peer, e, state.MsgID, fmt.Sprintf("Error: %s", html.EscapeString(err.Error())), kb)
 			h.clearEditState(senderID)
 			return
 		}
 
 		kb := h.getSettingsKeyboard(state.Page, true)
-		if state.InputPeer != nil {
-			_ = h.editMessageWithInputPeer(ctx, state.InputPeer, state.MsgID, fmt.Sprintf("Config Variables | Page: %d | State: edit", state.Page), kb)
+		var editErr error
+		if inputPeer != nil {
+			editErr = h.editMessageWithInputPeer(ctx, inputPeer, state.MsgID, fmt.Sprintf("Config Variables | Page: %d | State: edit", state.Page), kb)
 		} else {
-			_ = h.editMessage(ctx, state.Peer, e, state.MsgID, fmt.Sprintf("Config Variables | Page: %d | State: edit", state.Page), kb)
+			editErr = h.editMessage(ctx, state.Peer, e, state.MsgID, fmt.Sprintf("Config Variables | Page: %d | State: edit", state.Page), kb)
+		}
+		if editErr != nil {
+			_ = h.replyHTML(ctx, e, upd, fmt.Sprintf("Config Variables | Page: %d | State: edit", state.Page), kb)
 		}
 		h.clearEditState(senderID)
 		return
@@ -667,22 +680,30 @@ func (h *Handler) handleAdminTextInput(ctx context.Context, e tg.Entities, upd m
 	currentVal := h.cfgMgr.Get(state.Key)
 	newProcessedVal, err := h.cfgMgr.UpdateConfig(ctx, state.Key, text)
 	if err != nil {
+		log.Warnf("UpdateConfig failed for %s with val %q: %v", state.Key, text, err)
 		kb := markup.InlineKeyboard(
 			markup.InlineButtonRow(
 				markup.Callback("Back", []byte(fmt.Sprintf("back_settings_%d_%t", state.Page, state.EditMode))),
 				markup.Callback("Close", []byte("close_settings")),
 			),
 		)
-		if state.InputPeer != nil {
-			_ = h.editMessageWithInputPeer(ctx, state.InputPeer, state.MsgID, fmt.Sprintf("ㄨ Error updating setting: %s", html.EscapeString(err.Error())), kb)
+		errText := fmt.Sprintf("Error updating setting: %s", html.EscapeString(err.Error()))
+		var editErr error
+		if inputPeer != nil {
+			editErr = h.editMessageWithInputPeer(ctx, inputPeer, state.MsgID, errText, kb)
 		} else {
-			_ = h.editMessage(ctx, state.Peer, e, state.MsgID, fmt.Sprintf("ㄨ Error updating setting: %s", html.EscapeString(err.Error())), kb)
+			editErr = h.editMessage(ctx, state.Peer, e, state.MsgID, errText, kb)
+		}
+		if editErr != nil {
+			_ = h.replyHTML(ctx, e, upd, errText, kb)
 		}
 		h.clearEditState(senderID)
 		return
 	}
 
-	feedback := fmt.Sprintf("Updated %s:\nOld value: %v\nNew value: %v", state.Key, currentVal, newProcessedVal)
+	currentValStr := html.EscapeString(fmt.Sprintf("%v", currentVal))
+	newValStr := html.EscapeString(fmt.Sprintf("%v", newProcessedVal))
+	feedback := fmt.Sprintf("Updated %s:\nOld value: %s\nNew value: %s", state.Key, currentValStr, newValStr)
 	if reflect.TypeOf(currentVal) != reflect.TypeOf(newProcessedVal) {
 		oldType := "nil"
 		if currentVal != nil {
@@ -702,10 +723,16 @@ func (h *Handler) handleAdminTextInput(ctx context.Context, e tg.Entities, upd m
 
 	panelText := fmt.Sprintf("Config Variables | Page: %d | State: %s\n\n%s", state.Page, stateStr, feedback)
 	kb := h.getSettingsKeyboard(state.Page, state.EditMode)
-	if state.InputPeer != nil {
-		_ = h.editMessageWithInputPeer(ctx, state.InputPeer, state.MsgID, panelText, kb)
+
+	var editErr error
+	if inputPeer != nil {
+		editErr = h.editMessageWithInputPeer(ctx, inputPeer, state.MsgID, panelText, kb)
 	} else {
-		_ = h.editMessage(ctx, state.Peer, e, state.MsgID, panelText, kb)
+		editErr = h.editMessage(ctx, state.Peer, e, state.MsgID, panelText, kb)
+	}
+	if editErr != nil {
+		log.Warnf("Failed to edit panel message %d, falling back to replyHTML: %v", state.MsgID, editErr)
+		_ = h.replyHTML(ctx, e, upd, panelText, kb)
 	}
 	h.clearEditState(senderID)
 }

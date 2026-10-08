@@ -478,6 +478,10 @@ func (w *ClientWorker) getChannelAccessHash(channelID int64) int64 {
 	return w.GetChannelAccessHash(channelID)
 }
 
+func (w *ClientWorker) SetChannelAccessHash(channelID, accessHash int64) {
+	w.setChannelAccessHash(channelID, accessHash)
+}
+
 func (w *ClientWorker) setChannelAccessHash(channelID, accessHash int64) {
 	w.channelAccessMu.Lock()
 	defer w.channelAccessMu.Unlock()

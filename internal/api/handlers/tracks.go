@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -45,6 +46,8 @@ func (h *TrackHandler) Routes(r chi.Router) {
 			sub.Use(middleware.RequireAuth(h.authSvc))
 		}
 		sub.Delete("/tracks/{id}", h.Delete)
+		sub.Delete("/admin/tracks/delete", h.AdminDelete)
+		sub.Post("/admin/tracks/delete", h.AdminDelete)
 	})
 }
 
@@ -178,7 +181,7 @@ func (h *TrackHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hard := api.ParseQueryBool(r, "hard", false)
+	hard := api.ParseQueryBool(r, "hard", true)
 	purgeCache := api.ParseQueryBool(r, "purge_cache", true)
 	purgeArtwork := api.ParseQueryBool(r, "purge_artwork", true)
 
@@ -206,5 +209,99 @@ func (h *TrackHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		"cache_purged":    res.CachePurged,
 		"purged_artworks": res.PurgedArtworks,
 		"message":         res.Message,
+	})
+}
+
+// AdminDeleteTracksRequest is the payload for /admin/tracks/delete.
+type AdminDeleteTracksRequest struct {
+	TrackID  any      `json:"track_id"`
+	TrackIDs []string `json:"track_ids"`
+}
+
+// AdminDelete handles DELETE and POST /admin/tracks/delete (compatible with StreamXBot).
+func (h *TrackHandler) AdminDelete(w http.ResponseWriter, r *http.Request) {
+	if err := h.checkAdmin(r); err != nil {
+		if strings.Contains(err.Error(), "forbidden") {
+			api.RespondError(w, http.StatusForbidden, err.Error())
+		} else {
+			api.RespondError(w, http.StatusUnauthorized, err.Error())
+		}
+		return
+	}
+
+	var trackIDs []string
+	seen := make(map[string]bool)
+
+	// 1. Try reading JSON body if present
+	if r.Body != nil {
+		var req AdminDeleteTracksRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			if s, ok := req.TrackID.(string); ok && strings.TrimSpace(s) != "" {
+				s = strings.TrimSpace(s)
+				if !seen[s] {
+					seen[s] = true
+					trackIDs = append(trackIDs, s)
+				}
+			} else if slice, ok := req.TrackID.([]any); ok {
+				for _, item := range slice {
+					s := strings.TrimSpace(fmt.Sprint(item))
+					if s != "" && !seen[s] {
+						seen[s] = true
+						trackIDs = append(trackIDs, s)
+					}
+				}
+			}
+			for _, tid := range req.TrackIDs {
+				tid = strings.TrimSpace(tid)
+				if tid != "" && !seen[tid] {
+					seen[tid] = true
+					trackIDs = append(trackIDs, tid)
+				}
+			}
+		}
+	}
+
+	// 2. Fallback or merge query parameters
+	if qID := strings.TrimSpace(r.URL.Query().Get("track_id")); qID != "" && !seen[qID] {
+		seen[qID] = true
+		trackIDs = append(trackIDs, qID)
+	}
+	for _, qIDs := range r.URL.Query()["track_ids"] {
+		for _, tid := range strings.Split(qIDs, ",") {
+			tid = strings.TrimSpace(tid)
+			if tid != "" && !seen[tid] {
+				seen[tid] = true
+				trackIDs = append(trackIDs, tid)
+			}
+		}
+	}
+
+	if len(trackIDs) == 0 {
+		api.RespondError(w, http.StatusBadRequest, "track_id or track_ids is required")
+		return
+	}
+
+	hard := api.ParseQueryBool(r, "hard", true)
+	purgeCache := api.ParseQueryBool(r, "purge_cache", true)
+	purgeArtwork := api.ParseQueryBool(r, "purge_artwork", true)
+
+	opts := services.DeleteTrackOptions{
+		Hard:         hard,
+		PurgeCache:   purgeCache,
+		PurgeArtwork: purgeArtwork,
+	}
+
+	deletedCount := 0
+	for _, tid := range trackIDs {
+		if _, err := h.trackService.DeleteTrack(r.Context(), tid, opts); err == nil {
+			deletedCount++
+		}
+	}
+
+	api.RespondJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":        true,
+		"track_ids": trackIDs,
+		"matched":   len(trackIDs),
+		"deleted":   deletedCount,
 	})
 }

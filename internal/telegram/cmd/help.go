@@ -67,7 +67,23 @@ func (h *Handler) handleCallbackQuery(ctx context.Context, e tg.Entities, update
 		return
 	}
 
+	// Cache access hashes from entities
+	if w := h.tgService.PrimaryWorker(); w != nil {
+		for uid, u := range e.Users {
+			if u != nil && u.AccessHash != 0 {
+				w.SetUserAccessHash(uid, u.AccessHash)
+			}
+		}
+		for cid, ch := range e.Channels {
+			if ch != nil && ch.AccessHash != 0 {
+				w.SetChannelAccessHash(cid, ch.AccessHash)
+			}
+		}
+	}
+
 	data := string(update.Data)
+	log.Infof("[telegram] Callback query from user %d: %q", update.UserID, data)
+
 	w := h.tgService.PrimaryWorker()
 	if w == nil || w.API == nil {
 		return
