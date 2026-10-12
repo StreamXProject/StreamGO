@@ -175,7 +175,7 @@ func (h *Handler) routeMessage(ctx context.Context, e tg.Entities, upd message.A
 	chatID, senderID, _, _ := h.extractPeerInfo(msg, e)
 
 	if text != "" {
-		log.Infof("[telegram] Received message from user %d in chat %d: %q", senderID, chatID, text)
+		log.Debugf("[telegram] Received message from user %d in chat %d: %q", senderID, chatID, text)
 	}
 
 	// Check if this message is an audio upload
